@@ -9,10 +9,10 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 /// Run the interactive workspace manager (the default `hh` action).
-pub async fn run(cli: crate::cli::Cli) -> Result<()> {
+pub async fn run(_cli: crate::cli::Cli) -> Result<()> {
     crate::container::ensure_docker_installed_and_running()?;
 
-    let config_path = match resolve_or_prompt_config_path(cli.config)? {
+    let config_path = match resolve_or_prompt_config_path(None)? {
         Some(path) => path,
         None => return Ok(()),
     };

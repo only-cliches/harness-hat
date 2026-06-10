@@ -4,18 +4,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "hh", version, about = "Harness Hat — manager UI")]
+#[command(name = "hh", version, about = "Harness Hat — Docker-backed dev sessions")]
 struct CliOptions {
-    /// Path to config file. Used by the interactive workspace manager (the
-    /// default action when no subcommand is given).
-    #[arg(short, long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
 
-/// Subcommands. When none is given, `hh` launches the interactive manager.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     /// Generate a sample config file (defaults to ./harness-hat.toml).
@@ -23,17 +17,23 @@ pub enum Command {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Open an interactive shell in a running session. With no id, lists the
-    /// running sessions and their ids.
+    /// Boot a container in the current directory and run a command.
+    ///
+    /// Template resolution order: --template flag, then [container].template
+    /// in harness-rules.toml, then an interactive picker.
+    /// Defaults to /bin/bash when no command is given.
     Shell {
-        #[arg(value_name = "ID")]
-        id: Option<String>,
+        /// Container template to use (dockerfile stem, e.g. "rust", "default").
+        #[arg(short, long, value_name = "TEMPLATE")]
+        template: Option<String>,
+        /// Command and arguments to run inside the container.
+        #[arg(value_name = "ARGS", trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct Cli {
-    pub config: Option<PathBuf>,
     pub command: Option<Command>,
 }
 
@@ -43,22 +43,23 @@ pub fn parse() -> Result<Cli> {
 }
 
 pub fn parse_from(raw: Vec<OsString>) -> Result<Cli> {
-    const USAGE: &str = "Usage: hh [--config PATH] [init [PATH] | shell [ID]]";
+    const USAGE: &str = "Usage: hh [init [PATH] | shell [--template TEMPLATE] [ARGS...]]";
     if raw.is_empty() {
         bail!("missing argv[0]. {USAGE}");
     }
-
-    // `Error::exit()` prints --help/--version to stdout and exits 0, and prints
-    // genuine usage errors to stderr (exit 2) with clap's formatting, rather
-    // than surfacing them as an anyhow "Error: ..." message.
     let options = match CliOptions::try_parse_from(raw) {
         Ok(options) => options,
         Err(err) => err.exit(),
     };
     Ok(Cli {
-        config: options.config,
         command: options.command,
     })
+}
+
+pub fn print_help() {
+    use clap::CommandFactory;
+    CliOptions::command().print_help().unwrap();
+    println!();
 }
 
 #[cfg(test)]
@@ -75,14 +76,6 @@ mod tests {
     fn bare_invocation_has_no_subcommand() {
         let cli = parse_from(argv(&["hh"])).expect("parse");
         assert!(cli.command.is_none());
-        assert!(cli.config.is_none());
-    }
-
-    #[test]
-    fn config_flag_applies_to_default_action() {
-        let cli = parse_from(argv(&["hh", "--config", "/tmp/x.toml"])).expect("parse");
-        assert!(cli.command.is_none());
-        assert_eq!(cli.config, Some(PathBuf::from("/tmp/x.toml")));
     }
 
     #[test]
@@ -97,11 +90,27 @@ mod tests {
     }
 
     #[test]
-    fn shell_subcommand_takes_optional_id() {
+    fn shell_subcommand_no_args_defaults_to_bash() {
         let cli = parse_from(argv(&["hh", "shell"])).expect("parse");
-        assert!(matches!(cli.command, Some(Command::Shell { id: None })));
+        assert!(
+            matches!(cli.command, Some(Command::Shell { template: None, args }) if args.is_empty())
+        );
+    }
 
-        let cli = parse_from(argv(&["hh", "shell", "0042"])).expect("parse");
-        assert!(matches!(cli.command, Some(Command::Shell { id: Some(id) }) if id == "0042"));
+    #[test]
+    fn shell_subcommand_with_template_flag() {
+        let cli = parse_from(argv(&["hh", "shell", "--template", "rust"])).expect("parse");
+        assert!(
+            matches!(cli.command, Some(Command::Shell { template: Some(t), args }) if t == "rust" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn shell_subcommand_passes_through_argv() {
+        let cli = parse_from(argv(&["hh", "shell", "claude", "--dangerously-skip-permissions"]))
+            .expect("parse");
+        assert!(
+            matches!(cli.command, Some(Command::Shell { template: None, ref args }) if args == &["claude", "--dangerously-skip-permissions"])
+        );
     }
 }

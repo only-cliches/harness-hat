@@ -25,6 +25,14 @@ impl Default for NetworkPolicy {
 
 // ── harness-rules.toml schema ───────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ContainerConfig {
+    /// Container template to use for `hh shell` when no --template flag is given.
+    /// Matches the dockerfile stem (e.g. "default", "rust", "typescript").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProjectRules {
     /// Schema version for future harness-rules.toml migrations.
@@ -35,6 +43,8 @@ pub struct ProjectRules {
     pub llm_instructions: Option<String>,
     #[serde(default)]
     pub network: NetworkRules,
+    #[serde(default)]
+    pub container: ContainerConfig,
 }
 
 fn current_rules_version() -> u32 {
@@ -47,6 +57,7 @@ impl Default for ProjectRules {
             version: CURRENT_RULES_VERSION,
             llm_instructions: None,
             network: NetworkRules::default(),
+            container: ContainerConfig::default(),
         }
     }
 }
