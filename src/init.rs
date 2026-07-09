@@ -12,6 +12,7 @@ const TYPESCRIPT_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/typescript.
 const GO_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/go.dockerfile");
 const RUST_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/rust.dockerfile");
 const PHP_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/php.dockerfile");
+const DOTNET_DOCKERFILE_TEMPLATE: &str = include_str!("../docker/dotnet.dockerfile");
 
 /// Built-in dockerfile templates compiled into the binary.
 ///
@@ -24,6 +25,7 @@ const BUILTIN_DOCKERFILES: &[(&str, &str)] = &[
     ("go.dockerfile", GO_DOCKERFILE_TEMPLATE),
     ("rust.dockerfile", RUST_DOCKERFILE_TEMPLATE),
     ("php.dockerfile", PHP_DOCKERFILE_TEMPLATE),
+    ("dotnet.dockerfile", DOTNET_DOCKERFILE_TEMPLATE),
 ];
 
 const HOSTDO_SCRIPT: &str = include_str!("../docker/scripts/hostdo.py");
@@ -133,6 +135,7 @@ pub fn ensure_language_dockerfiles(docker_dir: &Path) -> Result<()> {
     ensure_template_dockerfile(docker_dir, "go.dockerfile", GO_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "rust.dockerfile", RUST_DOCKERFILE_TEMPLATE)?;
     ensure_template_dockerfile(docker_dir, "php.dockerfile", PHP_DOCKERFILE_TEMPLATE)?;
+    ensure_template_dockerfile(docker_dir, "dotnet.dockerfile", DOTNET_DOCKERFILE_TEMPLATE)?;
     Ok(())
 }
 
@@ -291,6 +294,7 @@ mod tests {
         assert!(paths.contains(&"go.dockerfile"));
         assert!(paths.contains(&"rust.dockerfile"));
         assert!(paths.contains(&"php.dockerfile"));
+        assert!(paths.contains(&"dotnet.dockerfile"));
     }
 
     #[test]
@@ -382,6 +386,7 @@ mod tests {
             ("go.dockerfile", "Go image"),
             ("rust.dockerfile", "Rust image"),
             ("php.dockerfile", "PHP image"),
+            ("dotnet.dockerfile", ".NET / C# image"),
         ] {
             let content = std::fs::read_to_string(root.join(path)).expect("read dockerfile");
             assert!(content.contains(marker), "{path} missing marker {marker}");

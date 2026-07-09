@@ -95,6 +95,7 @@ The base image is Ubuntu 24.04 with Node 22, bundled agent CLIs (`claude`, `code
 | `go`         | Go, `gopls`, Delve, `staticcheck`, `golangci-lint`                 |
 | `rust`       | Rust stable + rustfmt, clippy, rust-analyzer, nextest, audit, deny |
 | `php`        | PHP CLI/dev, Composer, PHPUnit, PHP-CS-Fixer, PHPStan, Pint, Xdebug, PCOV |
+| `dotnet`     | .NET SDK 8/10, EF Core CLI, dotnet-format, CSharpier                     |
 
 Drop your own `something.dockerfile` under `docker_dir` and reference it as `image = "something"`. Workspace-local `*.dockerfile` files are also auto-discovered as launch templates when their first non-comment instruction is `FROM harness-hat-base:local`.
 

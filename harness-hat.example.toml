@@ -216,6 +216,22 @@ starter_network_allowlist = [
   "domain=repo.packagist.org",
 ]
 
+[container_profiles.dotnet]
+image = "dotnet"
+memory = "4g"
+cpus = "2"
+shm_size = "1g"
+starter_network_allowlist = [
+  "domain=github.com",
+  "domain=api.github.com",
+  "domain=raw.githubusercontent.com",
+  "domain=objects.githubusercontent.com",
+  "domain=nuget.org",
+  "domain=*.nuget.org",
+  "domain=api.nuget.org",
+  "domain=packages.microsoft.com",
+]
+
 [container_profiles.base]
 image = "default"
 starter_network_allowlist = [

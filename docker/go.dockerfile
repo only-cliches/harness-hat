@@ -1,7 +1,7 @@
 # harness-hat Go image
 #
-# Build after harness-hat-base:local:
-#   docker build -t harness-hat-go:local -f docker/go.dockerfile .
+# Build after harness-hat-base:local (from repo root):
+#   docker build -t harness-hat-go:local -f docker/go.dockerfile docker/
 
 FROM harness-hat-base:local
 

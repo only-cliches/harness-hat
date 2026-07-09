@@ -1,7 +1,7 @@
 # harness-hat TypeScript / Node / Bun image
 #
-# Build after harness-hat-base:local:
-#   docker build -t harness-hat-typescript:local -f docker/typescript.dockerfile .
+# Build after harness-hat-base:local (from repo root):
+#   docker build -t harness-hat-typescript:local -f docker/typescript.dockerfile docker/
 
 FROM harness-hat-base:local
 

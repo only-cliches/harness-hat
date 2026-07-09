@@ -1,7 +1,7 @@
 # harness-hat Rust image
 #
-# Build after harness-hat-base:local:
-#   docker build -t harness-hat-rust:local -f docker/rust.dockerfile .
+# Build after harness-hat-base:local (from repo root):
+#   docker build -t harness-hat-rust:local -f docker/rust.dockerfile docker/
 
 FROM harness-hat-base:local
 

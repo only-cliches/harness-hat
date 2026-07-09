@@ -1,7 +1,7 @@
 # harness-hat PHP image
 #
-# Build after harness-hat-base:local:
-#   docker build -t harness-hat-php:local -f docker/php.dockerfile .
+# Build after harness-hat-base:local (from repo root):
+#   docker build -t harness-hat-php:local -f docker/php.dockerfile docker/
 
 FROM harness-hat-base:local
 
