@@ -152,6 +152,18 @@ pub fn ensure_language_dockerfiles(docker_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refresh assets owned by Harness Hat during a graphical app upgrade.
+/// `default.dockerfile` is intentionally excluded because it is the user's
+/// editable fallback template.
+pub fn refresh_managed_docker_assets(docker_dir: &Path) -> Result<()> {
+    fs::create_dir_all(docker_dir)?;
+    for (name, contents) in BUILTIN_DOCKERFILES {
+        write_text_file(&docker_dir.join(name), contents)?;
+    }
+    ensure_default_dockerfile(docker_dir)?;
+    ensure_helper_scripts(docker_dir)
+}
+
 fn ensure_builtin_dockerfiles(docker_dir: &Path) -> Result<()> {
     ensure_base_dockerfile(docker_dir)?;
     ensure_default_dockerfile(docker_dir)?;
@@ -224,8 +236,8 @@ fn write_text_file(path: &Path, contents: &str) -> Result<()> {
 mod tests {
     use super::{
         builtin_dockerfile_paths, ensure_base_dockerfile, ensure_default_dockerfile,
-        ensure_docker_assets, ensure_language_dockerfiles, resolve_init_docker_dir,
-        write_sample_config,
+        ensure_docker_assets, ensure_language_dockerfiles, refresh_managed_docker_assets,
+        resolve_init_docker_dir, write_sample_config,
     };
     use crate::config::Config;
 
@@ -326,6 +338,24 @@ mod tests {
         assert!(paths.contains(&"android.dockerfile"));
         assert!(paths.contains(&"csharp.dockerfile"));
         assert!(paths.contains(&"php.dockerfile"));
+    }
+
+    #[test]
+    fn graphical_upgrade_refreshes_managed_assets_but_preserves_default() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("harness-hat-base.dockerfile"), "old base").unwrap();
+        std::fs::write(root.path().join("default.dockerfile"), "my custom default").unwrap();
+
+        refresh_managed_docker_assets(root.path()).unwrap();
+
+        let base =
+            std::fs::read_to_string(root.path().join("harness-hat-base.dockerfile")).unwrap();
+        assert!(base.contains("dev.harness-hat.desktop-ssh"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("default.dockerfile")).unwrap(),
+            "my custom default"
+        );
+        assert!(root.path().join("scripts/hostdo.py").is_file());
     }
 
     #[test]

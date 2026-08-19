@@ -29,6 +29,8 @@ pub fn run(
     force_new: bool,
     explicit_path: Option<PathBuf>,
     launch_only: bool,
+    desktop: bool,
+    open_desktop: bool,
     open_editor: Option<crate::cli::OpenEditor>,
     explicit_config: Option<PathBuf>,
 ) -> Result<i32> {
@@ -93,13 +95,33 @@ pub fn run(
                 matched.canonical_path.display()
             ),
         );
-        if !force_new && let Some(session) = newest_session_for_workspace(&matched.name)? {
+        let reusable_session = if force_new {
+            None
+        } else {
+            newest_session_for_workspace(&matched.name)?
+        };
+        if let Some(session) = reusable_session
+            && (!desktop || crate::desktop::is_desktop_container(&session.name)?)
+        {
             status(
                 launch_only,
                 format!("attaching to running session {}", session.alias),
             );
             let mount_target = mount_target_for_session(&session, &config);
             let workdir = workspace_workdir(&matched, &pwd, &mount_target);
+            if desktop {
+                if open_desktop {
+                    crate::desktop::open(
+                        &session.name,
+                        &matched.name,
+                        &workdir,
+                        &config.logging.log_dir,
+                    )?;
+                } else {
+                    crate::desktop::prepare(&session.name, &matched.name, &config.logging.log_dir)?;
+                }
+                return Ok(0);
+            }
             if let Some(editor) = open_editor {
                 crate::shell::open(&session.alias, editor)?;
                 return Ok(0);
@@ -120,14 +142,20 @@ pub fn run(
             effective_override,
             launch_only,
         )?;
+        let force_rebuild = force_rebuild
+            || (desktop
+                && desktop_image_needs_rebuild(&config, &matched.canonical_path, &template)?);
         // Primary config values are explicit overrides. All remembered choices
         // belong to the workspace and are persisted in harness-rules.toml.
         if matched.template.is_none() && rules.template.as_deref() != Some(&template) {
             save_workspace_template(&rules_path, &template)?;
         }
-        let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
+        let mut terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
             env_passthrough_for_template(&config, &template),
         );
+        if desktop {
+            terminal_env.push(crate::desktop::authorized_key_env(&config.logging.log_dir)?);
+        }
         let launch_cwd = matched.mount_cwd.then(|| pwd.to_str()).flatten();
         let resp = post_launch(
             &control_url,
@@ -143,7 +171,7 @@ pub fn run(
             format!("launched session {} ({})", resp.alias, resp.docker_name),
         );
         wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
-        if launch_only {
+        if launch_only && !desktop {
             println!("{}", resp.alias);
             return Ok(0);
         }
@@ -158,6 +186,19 @@ pub fn run(
         } else {
             workspace_workdir(&matched, &pwd, &resp.mount_target)
         };
+        if desktop {
+            if open_desktop {
+                crate::desktop::open(
+                    &resp.docker_name,
+                    &matched.name,
+                    &workdir,
+                    &config.logging.log_dir,
+                )?;
+            } else {
+                crate::desktop::prepare(&resp.docker_name, &matched.name, &config.logging.log_dir)?;
+            }
+            return Ok(0);
+        }
         return attach_and_report(&resp.docker_name, &args, Some(&workdir));
     }
 
@@ -195,10 +236,15 @@ pub fn run(
         template_override.as_deref(),
         launch_only,
     )?;
+    let force_rebuild =
+        force_rebuild || (desktop && desktop_image_needs_rebuild(&config, &pwd, &template)?);
     save_workspace_template(&workspace_rules_path(&pwd), &template)?;
-    let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
+    let mut terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
         env_passthrough_for_template(&config, &template),
     );
+    if desktop {
+        terminal_env.push(crate::desktop::authorized_key_env(&config.logging.log_dir)?);
+    }
     let resp = post_launch(
         &control_url,
         &token,
@@ -213,12 +259,25 @@ pub fn run(
         format!("launched session {} ({})", resp.alias, resp.docker_name),
     );
     wait_for_container_running(&resp.docker_name, Duration::from_secs(15))?;
-    if launch_only {
+    if launch_only && !desktop {
         println!("{}", resp.alias);
         return Ok(0);
     }
     if let Some(editor) = open_editor {
         crate::shell::open(&resp.alias, editor)?;
+        return Ok(0);
+    }
+    if desktop {
+        if open_desktop {
+            crate::desktop::open(
+                &resp.docker_name,
+                &workspace_name,
+                &resp.mount_target,
+                &config.logging.log_dir,
+            )?;
+        } else {
+            crate::desktop::prepare(&resp.docker_name, &workspace_name, &config.logging.log_dir)?;
+        }
         return Ok(0);
     }
     attach_and_report(&resp.docker_name, &args, Some(&resp.mount_target))
@@ -524,6 +583,30 @@ fn env_passthrough_for_template<'a>(config: &'a Config, template: &str) -> &'a [
         .find(|c| c.name == template)
         .map(|c| c.env_passthrough.as_slice())
         .unwrap_or(&config.defaults.containers.env_passthrough)
+}
+
+fn desktop_image_needs_rebuild(
+    config: &Config,
+    workspace_path: &Path,
+    template: &str,
+) -> Result<bool> {
+    let templates = crate::config::resolve_workspace_container_templates(
+        workspace_path,
+        &config.defaults.containers,
+        &config.containers,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "failed to resolve Desktop image for {}: {error}",
+            workspace_path.display()
+        )
+    })?;
+    let image = templates
+        .iter()
+        .find(|container| container.name == template)
+        .map(|container| container.image.as_str())
+        .with_context(|| format!("no container template named {template:?}"))?;
+    Ok(!crate::desktop::image_supports_desktop_ssh(image))
 }
 
 // ── Template picker ─────────────────────────────────────────────────────────

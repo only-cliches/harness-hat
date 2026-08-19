@@ -88,6 +88,9 @@ pub enum Command {
         /// Always launch a fresh session instead of reusing a running one.
         #[arg(long)]
         new: bool,
+        /// Open the workspace through Claude Desktop over a loopback-only SSH connection.
+        #[arg(long, conflicts_with = "list")]
+        desktop: bool,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
@@ -307,6 +310,7 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
             name,
             rebuild,
             new,
+            desktop,
             mut args,
             mut open,
         } => {
@@ -323,6 +327,10 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
                 "`ws --list` cannot be combined with `--new`, a command, or `open`"
             );
             anyhow::ensure!(
+                !desktop || (args.is_empty() && open.is_none()),
+                "`ws --desktop` cannot be combined with a command or `open`"
+            );
+            anyhow::ensure!(
                 args.first().is_none_or(|arg| arg != "--path"),
                 "`ws` is cwd-based; use `sh new --path DIRECTORY` for an explicit directory"
             );
@@ -332,6 +340,7 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
                 name,
                 rebuild,
                 new,
+                desktop,
                 args,
                 open,
             }))
@@ -576,6 +585,23 @@ mod tests {
             }) if args.is_empty() && editor.binary() == OsStr::new("vscode")
         ));
         assert!(parse_from(argv(&["hat", "ws", "--path", "."])).is_err());
+    }
+
+    #[test]
+    fn workspace_desktop_action_parses_and_rejects_passthrough_actions() {
+        assert!(matches!(
+            parse_from(argv(&["hat", "ws", "--desktop"]))
+                .unwrap()
+                .command,
+            Some(Command::Workspace {
+                desktop: true,
+                ref args,
+                open: None,
+                ..
+            }) if args.is_empty()
+        ));
+        assert!(parse_from(argv(&["hat", "ws", "--desktop", "claude"])).is_err());
+        assert!(parse_from(argv(&["hat", "ws", "--desktop", "open", "code"])).is_err());
     }
 
     #[test]

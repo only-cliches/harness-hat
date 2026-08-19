@@ -39,6 +39,7 @@ const CLAUDE_CONFIG_CONTAINER_PATH: &str = "/home/coder/.claude.json";
 const CODEX_HOME_CONTAINER_PATH: &str = "/home/coder/.codex";
 const CODEX_SEED_CONTAINER_PATH: &str = "/run/harness-hat/codex-seed";
 const CODEX_SEED_ENV: &str = "HARNESS_HAT_CODEX_SEED";
+const DESKTOP_SSH_PORT: &str = "2222";
 
 /// Return a Linux-container mount target that mirrors the host workspace path
 /// as closely as possible. Absolute POSIX paths are preserved, while Windows
@@ -112,6 +113,9 @@ pub fn spawn(
         .map(|proxy| proxy.proxy_auth_token().to_string())
         .unwrap_or_default();
     let mut launch_notes = Vec::new();
+    let desktop_mode = extra_env.iter().any(|(name, value)| {
+        name == crate::desktop::AUTHORIZED_KEY_ENV && !value.trim().is_empty()
+    });
 
     let mut docker_args: Vec<String> = vec![
         "run".to_string(),
@@ -147,6 +151,14 @@ pub fn spawn(
     ] {
         docker_args.push("--label".to_string());
         docker_args.push(format!("{key}={value}"));
+    }
+    if desktop_mode {
+        docker_args.push("--label".to_string());
+        docker_args.push(format!("{}=true", crate::desktop::LABEL_DESKTOP));
+        docker_args.extend_from_slice(&[
+            "--publish".to_string(),
+            format!("127.0.0.1::{DESKTOP_SSH_PORT}"),
+        ]);
     }
 
     #[cfg(target_os = "linux")]
@@ -449,6 +461,19 @@ pub fn spawn(
             .count()
     });
     let mut seed_tempfiles: Vec<NamedTempFile> = Vec::new();
+    if desktop_mode {
+        let policy = prepare_desktop_policy()?;
+        docker_args.extend(docker_bind_mount_args(
+            &policy.path().display().to_string(),
+            crate::desktop::MANAGED_POLICY_CONTAINER_PATH,
+            &MountMode::Ro,
+        )?);
+        seed_tempfiles.push(policy);
+        launch_notes.push(
+            "Claude Desktop safety policy mounted read-only; host browser, Chrome, connectors, and computer-use tools are disabled"
+                .to_string(),
+        );
+    }
     let has_top_level_claude_config_mount = sorted_mounts
         .iter()
         .any(|mount| container_path_string(&mount.container) == CLAUDE_CONFIG_CONTAINER_PATH);
@@ -641,6 +666,10 @@ pub fn spawn(
             session_token: session_token.to_string(),
             mount_target: mount_str,
             launched_at: Instant::now(),
+            desktop_mode,
+            desktop_ssh_ever_connected: false,
+            desktop_ssh_disconnected_at: None,
+            last_desktop_ssh_check: Instant::now(),
             last_container_state_check: Instant::now(),
             terminal_snapshot_hash: 0,
             terminal_changed_at: Instant::now(),
@@ -682,6 +711,18 @@ fn docker_pty_options(docker_args: Vec<String>) -> tty::Options {
     }
 
     options
+}
+
+fn prepare_desktop_policy() -> Result<NamedTempFile> {
+    let mut file = tempfile::Builder::new()
+        .prefix("harness-hat-claude-desktop-policy-")
+        .tempfile()
+        .context("creating Claude Desktop managed policy")?;
+    file.write_all(crate::desktop::MANAGED_POLICY.as_bytes())
+        .context("writing Claude Desktop managed policy")?;
+    file.flush()
+        .context("flushing Claude Desktop managed policy")?;
+    Ok(file)
 }
 
 /// Pick the next integer id after both the largest numeric id currently used by

@@ -19,6 +19,25 @@ const SYSTEMD_UNIT: &str = "harness-hat.service";
 const WINDOWS_TASK: &str = "Harness Hat";
 
 pub fn install(explicit_config: Option<PathBuf>, headless: bool) -> Result<()> {
+    install_inner(explicit_config, headless, None)
+}
+
+/// Install using an explicitly staged daemon executable. The graphical
+/// launcher uses this after copying its bundled tools into a stable per-user
+/// directory, so moving the original app/ZIP cannot break startup.
+pub fn install_with_daemon(
+    explicit_config: Option<PathBuf>,
+    headless: bool,
+    daemon: PathBuf,
+) -> Result<()> {
+    install_inner(explicit_config, headless, Some(daemon))
+}
+
+fn install_inner(
+    explicit_config: Option<PathBuf>,
+    headless: bool,
+    staged_daemon: Option<PathBuf>,
+) -> Result<()> {
     ensure_normal_user()?;
     if headless && !cfg!(target_os = "linux") {
         bail!("hat install --headless is supported on Linux only");
@@ -30,11 +49,18 @@ pub fn install(explicit_config: Option<PathBuf>, headless: bool) -> Result<()> {
     // Validate before making a persistent startup change. In particular this
     // catches an invalid Docker directory rather than creating a restart loop.
     crate::config::load(&config_path)?;
-    let executable = std::env::current_exe()
-        .context("locating the current hat executable")?
-        .canonicalize()
-        .context("canonicalizing the current hat executable")?;
-    let service_executable = daemon_executable(&executable)?;
+    let service_executable = match staged_daemon {
+        Some(daemon) => daemon
+            .canonicalize()
+            .context("canonicalizing staged Harness Hat daemon")?,
+        None => {
+            let executable = std::env::current_exe()
+                .context("locating the current hat executable")?
+                .canonicalize()
+                .context("canonicalizing the current hat executable")?;
+            daemon_executable(&executable)?
+        }
+    };
 
     #[cfg(target_os = "macos")]
     install_macos(&service_executable, &config_path)?;

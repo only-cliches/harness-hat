@@ -380,6 +380,48 @@ impl App {
                 }
             }
 
+            if self.sessions[i].desktop_mode
+                && !self.sessions[i].is_exited()
+                && self.sessions[i].last_desktop_ssh_check.elapsed()
+                    >= crate::desktop::SSH_CONNECTION_POLL_INTERVAL
+            {
+                self.sessions[i].last_desktop_ssh_check = std::time::Instant::now();
+                let docker_name = self.sessions[i].docker_name.clone();
+                match crate::desktop::ssh_connected(&docker_name) {
+                    Ok(true) => {
+                        self.sessions[i].desktop_ssh_ever_connected = true;
+                        self.sessions[i].desktop_ssh_disconnected_at = None;
+                    }
+                    Ok(false) => {
+                        let launched_at = self.sessions[i].launched_at;
+                        let disconnected_at = *self.sessions[i]
+                            .desktop_ssh_disconnected_at
+                            .get_or_insert(launched_at);
+                        let grace = if self.sessions[i].desktop_ssh_ever_connected {
+                            crate::desktop::SSH_DISCONNECT_GRACE
+                        } else {
+                            crate::desktop::SSH_INITIAL_CONNECTION_GRACE
+                        };
+                        if disconnected_at.elapsed() >= grace {
+                            let label = self.sessions[i].tab_label();
+                            self.push_log(
+                                format!(
+                                    "stopping Desktop container '{label}' after {} minutes without an SSH connection",
+                                    grace.as_secs() / 60
+                                ),
+                                false,
+                            );
+                            self.mark_session_stopped(i);
+                            changed = true;
+                        }
+                    }
+                    // Docker can be briefly unavailable during an engine
+                    // restart. A failed probe must never advance the cleanup
+                    // timer or be treated as a disconnect.
+                    Err(_) => {}
+                }
+            }
+
             if !self.sessions[i].is_exited() {
                 continue;
             }

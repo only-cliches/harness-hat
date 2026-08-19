@@ -23,6 +23,10 @@ RUN cargo install --locked --version "${TUN2PROXY_VERSION}" --bin tun2proxy-bin 
 
 FROM ubuntu:26.04
 
+# Capability marker used by the graphical launcher to reject/rebuild images
+# created before Desktop SSH support was added.
+LABEL dev.harness-hat.desktop-ssh="1"
+
 ARG DEBIAN_FRONTEND=noninteractive
 ARG UBUNTU_ARCHIVE_MIRRORS="http://archive.ubuntu.com/ubuntu/ http://us.archive.ubuntu.com/ubuntu/ http://mirrors.edge.kernel.org/ubuntu/ http://mirror.us.leaseweb.net/ubuntu/"
 ARG UBUNTU_PORTS_MIRRORS="http://ports.ubuntu.com/ubuntu-ports/ http://mirror.us.leaseweb.net/ubuntu-ports/ http://mirrors.edge.kernel.org/ubuntu-ports/"
@@ -82,8 +86,11 @@ RUN apt-get update -o APT::Update::Error-Mode=any && apt-get install -y --no-ins
       dbus-user-session \
       gnome-keyring \
       libsecret-tools \
+      openssh-server \
       zsh \
     && rm -rf /var/lib/apt/lists/*
+
+RUN install -d -m 0755 /run/sshd /etc/claude-code
 
 # ast-grep: structural/AST-aware code search across all supported languages.
 # Pinned release binary verified against sha256 from GitHub release assets.
@@ -164,8 +171,75 @@ RUN cat > /usr/local/bin/harness-hat-user-session.sh << 'SCRIPT'
 #!/bin/sh
 set -e
 
+start_desktop_ssh() {
+    authorized_key="${HARNESS_HAT_DESKTOP_SSH_AUTHORIZED_KEY:-}"
+    [ -n "$authorized_key" ] || return 0
+
+    ssh_dir="${HOME:-/home/coder}/.ssh"
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    printf '%s\n' "$authorized_key" > "$ssh_dir/authorized_keys"
+    chmod 600 "$ssh_dir/authorized_keys"
+
+    # sshd constructs a fresh login environment instead of inheriting the
+    # container's. Preserve the environment Hat already supplied so the SSH
+    # session keeps its scoped control token/proxy and template toolchain PATH.
+    # Docker env-file values are single-line; defensively skip anything else.
+    python3 - "$ssh_dir/environment" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    for name, value in sorted(os.environ.items()):
+        if "\n" not in name and "=" not in name and "\n" not in value and "\r" not in value:
+            output.write(f"{name}={value}\n")
+PY
+    chmod 600 "$ssh_dir/environment"
+
+    host_key="$ssh_dir/harness-hat-desktop-host-key"
+    if [ ! -f "$host_key" ]; then
+        ssh-keygen -q -t ed25519 -N '' -f "$host_key"
+    fi
+    chmod 600 "$host_key"
+
+    config="$ssh_dir/harness-hat-desktop-sshd_config"
+    cat > "$config" <<EOF
+Port 2222
+ListenAddress 0.0.0.0
+HostKey $host_key
+PidFile $ssh_dir/harness-hat-desktop-sshd.pid
+AuthorizedKeysFile $ssh_dir/authorized_keys
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+UsePAM no
+AllowUsers coder
+AllowAgentForwarding no
+AllowTcpForwarding local
+GatewayPorts no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment yes
+Subsystem sftp internal-sftp
+EOF
+    chmod 600 "$config"
+
+    /usr/sbin/sshd -D -e -f "$config" > "$ssh_dir/harness-hat-desktop-sshd.log" 2>&1 &
+    sshd_pid=$!
+    sleep 0.2
+    if ! kill -0 "$sshd_pid" 2>/dev/null; then
+        echo "harness-hat: Claude Desktop SSH service failed to start" >&2
+        cat "$ssh_dir/harness-hat-desktop-sshd.log" >&2 || true
+        exit 1
+    fi
+}
+
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
-    export XDG_RUNTIME_DIR="/tmp/harness-hat-runtime-$(id -u)"
+    XDG_RUNTIME_DIR="/tmp/harness-hat-runtime-$(id -u)"
+    export XDG_RUNTIME_DIR
 fi
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
@@ -177,6 +251,8 @@ if command -v gnome-keyring-daemon >/dev/null 2>&1; then
     # user's Harness Hat state directory on the host, not in the host OS keyring.
     eval "$(printf '\n' | gnome-keyring-daemon --unlock --components=secrets 2>/dev/null || true)"
 fi
+
+start_desktop_ssh
 
 exec "$@"
 SCRIPT

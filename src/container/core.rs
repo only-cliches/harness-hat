@@ -76,6 +76,12 @@ pub struct ContainerSession {
     pub session_token: String,
     pub mount_target: String,
     pub launched_at: Instant,
+    /// Desktop-mode containers are monitored for SSH attachment so abandoned
+    /// Claude sessions can be cleaned up after a reconnect grace period.
+    pub desktop_mode: bool,
+    pub desktop_ssh_ever_connected: bool,
+    pub desktop_ssh_disconnected_at: Option<Instant>,
+    pub(crate) last_desktop_ssh_check: Instant,
     /// Last time the manager reconciled this session against Docker. PTY exit
     /// events are normally immediate, but Windows can occasionally lose one.
     pub(crate) last_container_state_check: Instant,

@@ -268,6 +268,7 @@ hat                    # open the manager TUI
 hat ws                 # start or attach to the workspace for the current directory
 hat ws codex           # run Codex in that workspace
 hat ws claude --resume # resume Claude in that workspace
+hat ws --desktop       # open a container-backed Claude Desktop environment
 hat ws --new            # force a fresh session for the current directory
 hat ws open codium      # open the current workspace session in a PATH editor
 hat sh                 # list active sessions
@@ -278,6 +279,26 @@ hat sh new --path .    # launch a fresh session and print its integer ID
 hat rebuild rust       # rebuild the base and Rust images
 hat restart            # reload config and policy without stopping sessions
 ```
+
+macOS and Windows releases also include a graphical Harness Hat launcher for
+people who do not use a terminal. On macOS, open **Harness Hat.app**. On
+Windows, extract the release ZIP and double-click **hat-launcher.exe**. The
+launcher checks Docker Desktop, OpenSSH, and Claude Desktop, creates the default
+configuration, and installs or repairs its per-user background service. Choose
+a project folder, confirm the saved or automatically suggested development
+environment, then either start the protected session by itself or open Claude
+Desktop too. It performs the same protected launch as `hat ws --desktop` and
+builds only the selected image when it is missing or too old for Desktop SSH.
+After opening Claude, the launcher displays the exact first-time steps: open
+**Code**, click **Local**, open **SSH**, choose **Add SSH host…**, and enter the
+shown `hat-<workspace>-<id>` alias. Port and identity stay blank because Hat's
+SSH configuration supplies them. The launcher also shows the direct loopback
+endpoint and remote project path. The session status turns green when SSH is
+connected.
+The launcher also shows running protected sessions, their SSH connection
+state, and a Stop control. Disconnected Desktop sessions are automatically
+cleaned up after a reconnect grace period. The terminal manager and TUI remain
+available unchanged.
 
 Harness Hat also reuses supported agent state where possible, while avoiding broad home-directory mounts. Some state is bind-mounted, some is seeded into a private session copy, and Codex state on Windows is copied into container-local storage to avoid unsafe SQLite sharing through Docker Desktop.
 
