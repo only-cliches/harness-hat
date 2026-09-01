@@ -28,6 +28,7 @@ mod process_util;
 pub mod proxy;
 pub mod rebuild;
 pub mod rules;
+pub mod rules_control;
 pub mod server;
 pub mod service;
 pub mod shared_config;

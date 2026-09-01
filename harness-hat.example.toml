@@ -119,6 +119,12 @@ container = "/home/coder/.config/codex"
 mode = "rw"
 
 [[defaults.containers.mounts]]
+# OpenCode stores global settings, agents, commands, and plugins here.
+host = "~/.config/opencode"
+container = "/home/coder/.config/opencode"
+mode = "rw"
+
+[[defaults.containers.mounts]]
 # Antigravity CLI uses ~/.gemini/antigravity-cli for settings/history. Login
 # tokens live in the OS keyring, so the base image starts a Linux Secret Service
 # and persists it through a dedicated keyrings mount. harness-hat injects that

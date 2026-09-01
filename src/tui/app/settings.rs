@@ -44,9 +44,21 @@ impl App {
         vec![
             SettingsActionRow {
                 key: 'r',
-                label: "Reload rules".to_string(),
-                desc: "Rescan and reload harness-rules.toml for this workspace.",
-                action: SettingsAction::ReloadRules,
+                label: "Inspect rules status".to_string(),
+                desc: "Show global and workspace rules trust/block state in the log.",
+                action: SettingsAction::InspectRules,
+            },
+            SettingsActionRow {
+                key: 't',
+                label: "Trust workspace rules".to_string(),
+                desc: "Explicitly trust the current reviewed workspace rules file.",
+                action: SettingsAction::TrustWorkspaceRules,
+            },
+            SettingsActionRow {
+                key: 'g',
+                label: "Trust global rules".to_string(),
+                desc: "Explicitly trust the current reviewed global rules file.",
+                action: SettingsAction::TrustGlobalRules,
             },
             SettingsActionRow {
                 key: 'x',
@@ -97,7 +109,9 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Char('l') => self.run_settings_action(pi),
-            KeyCode::Char('r') | KeyCode::Char('R') => self.do_reload_rules(pi),
+            KeyCode::Char('r') | KeyCode::Char('R') => self.do_inspect_rules(pi),
+            KeyCode::Char('t') | KeyCode::Char('T') => self.do_trust_workspace_rules(pi),
+            KeyCode::Char('g') | KeyCode::Char('G') => self.do_trust_global_rules(),
             KeyCode::Char('x') | KeyCode::Char('X') => self.prompt_remove_workspace(pi),
             _ => {}
         }
@@ -109,18 +123,52 @@ impl App {
             return;
         };
         match row.action {
-            SettingsAction::ReloadRules => self.do_reload_rules(pi),
+            SettingsAction::InspectRules => self.do_inspect_rules(pi),
+            SettingsAction::TrustWorkspaceRules => self.do_trust_workspace_rules(pi),
+            SettingsAction::TrustGlobalRules => self.do_trust_global_rules(),
             SettingsAction::RemoveWorkspace => self.prompt_remove_workspace(pi),
         }
     }
 
-    pub(crate) fn do_reload_rules(&mut self, pi: usize) {
+    pub(crate) fn do_inspect_rules(&mut self, pi: usize) {
         let cfg = self.config.get();
         let Some(proj) = cfg.workspaces.get(pi) else {
             return;
         };
-        let proj = proj.clone();
-        self.log_workspace_rules_status(&proj);
+        match self.config.rules_status(Some(&proj.name)) {
+            Ok(rules) => {
+                for rule in rules {
+                    let state = if rule.blocked { "BLOCKED" } else { "trusted" };
+                    self.push_log(format!("rules {state}: {}", rule.path), rule.blocked);
+                }
+            }
+            Err(error) => self.push_log(format!("failed inspecting rules: {error}"), true),
+        }
+    }
+
+    pub(crate) fn do_trust_workspace_rules(&mut self, pi: usize) {
+        let cfg = self.config.get();
+        let Some(proj) = cfg.workspaces.get(pi) else {
+            return;
+        };
+        let target = crate::server::RulesTrustTarget::Workspace {
+            workspace: proj.name.clone(),
+        };
+        if let Err(error) = self.trust_rules_target(target) {
+            self.push_log(
+                format!("failed trusting workspace rules: {}", error.reason),
+                true,
+            );
+        }
+    }
+
+    pub(crate) fn do_trust_global_rules(&mut self) {
+        if let Err(error) = self.trust_rules_target(crate::server::RulesTrustTarget::Global) {
+            self.push_log(
+                format!("failed trusting global rules: {}", error.reason),
+                true,
+            );
+        }
     }
 
     pub(crate) fn prompt_remove_workspace(&mut self, pi: usize) {
@@ -225,6 +273,11 @@ impl App {
             KeyCode::Char('k') => {
                 if let Some(si) = self.active_session {
                     self.stop_session_from_tui(si);
+                }
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                if let Some(si) = self.active_session {
+                    self.kill_network_connections_for_session(si);
                 }
             }
             _ => {}

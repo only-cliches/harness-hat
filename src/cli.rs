@@ -44,8 +44,12 @@ pub enum Command {
         #[arg(long, value_name = "DIRECTORY", requires = "id")]
         path: Option<PathBuf>,
         /// Terminate and remove the named session instead of attaching to it.
-        #[arg(long, conflicts_with = "args")]
+        #[arg(long, conflicts_with_all = ["args", "kill_connections"])]
         kill: bool,
+        /// Drop all network connections currently open for the named session.
+        /// New connections remain subject to the normal network policy.
+        #[arg(long, conflicts_with_all = ["args", "kill"])]
+        kill_connections: bool,
         #[arg(
             value_name = "COMMAND",
             trailing_var_arg = true,
@@ -98,12 +102,15 @@ pub enum Command {
         #[arg(skip)]
         open: Option<OpenEditor>,
     },
-    /// Rebuild the base image followed by selected templates, or every
-    /// Dockerfile template in the configured docker_dir when none are named.
+    /// Rebuild the base image followed by selected templates, or previously
+    /// built templates when none are named.
     Rebuild {
         /// Disable Docker's layer cache for the base and template builds.
         #[arg(long)]
         no_cache: bool,
+        /// Rebuild every Dockerfile template in the configured docker_dir.
+        #[arg(long, conflicts_with = "templates")]
+        all: bool,
         /// Dockerfile template stems to rebuild, for example `go` or `python`.
         #[arg(value_name = "TEMPLATE")]
         templates: Vec<String>,
@@ -121,6 +128,11 @@ pub enum Command {
     Approvals {
         #[command(subcommand)]
         command: ApprovalCommand,
+    },
+    /// Inspect or explicitly trust rules files managed by the running daemon.
+    Rules {
+        #[command(subcommand)]
+        command: RulesCommand,
     },
     /// Remove the per-user Harness Hat background agent.
     Uninstall,
@@ -189,6 +201,32 @@ pub enum ApprovalCommand {
     Trust {
         #[arg(value_name = "ID")]
         id: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum RulesCommand {
+    /// Show whether the global and workspace rules files are trusted or blocked.
+    Status {
+        /// Limit output to the global rules file and one named workspace file.
+        #[arg(long, value_name = "WORKSPACE")]
+        workspace: Option<String>,
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly trust the current contents of one reviewed rules file.
+    Trust {
+        /// Trust the configured global rules file.
+        #[arg(
+            long,
+            conflicts_with = "workspace",
+            required_unless_present = "workspace"
+        )]
+        global: bool,
+        /// Trust the rules file for one configured workspace.
+        #[arg(long, value_name = "WORKSPACE", conflicts_with = "global")]
+        workspace: Option<String>,
     },
 }
 
@@ -270,6 +308,7 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
             id,
             path,
             kill,
+            kill_connections,
             mut args,
             mut open,
         } => {
@@ -284,8 +323,8 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
             if id.as_deref() == Some("new") {
                 anyhow::ensure!(path.is_some(), "`sh new` requires `--path DIRECTORY`");
                 anyhow::ensure!(
-                    !kill && args.is_empty() && open.is_none(),
-                    "`sh new --path DIRECTORY` cannot be combined with a command, `--kill`, or `open`"
+                    !kill && !kill_connections && args.is_empty() && open.is_none(),
+                    "`sh new --path DIRECTORY` cannot be combined with a command, `--kill`, `--kill-connections`, or `open`"
                 );
             } else {
                 anyhow::ensure!(
@@ -297,6 +336,7 @@ fn normalize_actions(command: Option<Command>) -> Result<Option<Command>> {
                 id,
                 path,
                 kill,
+                kill_connections,
                 args,
                 open,
             }))
@@ -346,7 +386,8 @@ fn parse_editor(value: &OsString) -> Result<OpenEditor> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalCommand, Command, DialogCommand, parse_from};
+    use super::{ApprovalCommand, CliOptions, Command, DialogCommand, RulesCommand, parse_from};
+    use clap::Parser;
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
 
@@ -376,13 +417,13 @@ mod tests {
         let cli = parse_from(argv(&["hat", "shell"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: None, path: None, kill: false, ref args, open: None }) if args.is_empty()
+            Some(Command::Shell { id: None, path: None, kill: false, kill_connections: false, ref args, open: None }) if args.is_empty()
         ));
 
         let cli = parse_from(argv(&["hat", "shell", "42"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: Some(id), path: None, kill: false, ref args, open: None }) if id == "42" && args.is_empty()
+            Some(Command::Shell { id: Some(id), path: None, kill: false, kill_connections: false, ref args, open: None }) if id == "42" && args.is_empty()
         ));
     }
 
@@ -496,13 +537,25 @@ mod tests {
             parse_from(argv(&["hat", "rebuild", "--no-cache", "go", "python"])).expect("parse");
         let Some(Command::Rebuild {
             no_cache,
+            all,
             templates,
         }) = cli.command
         else {
             panic!("expected Rebuild subcommand");
         };
         assert!(no_cache);
+        assert!(!all);
         assert_eq!(templates, vec!["go", "python"]);
+    }
+
+    #[test]
+    fn rebuild_subcommand_parses_all_option() {
+        let cli = parse_from(argv(&["hat", "rebuild", "--all"])).expect("parse");
+        let Some(Command::Rebuild { all, templates, .. }) = cli.command else {
+            panic!("expected Rebuild subcommand");
+        };
+        assert!(all);
+        assert!(templates.is_empty());
     }
 
     #[test]
@@ -520,6 +573,7 @@ mod tests {
             id,
             path: None,
             kill: false,
+            kill_connections: false,
             args,
             open: None,
         }) = cli.command
@@ -540,7 +594,7 @@ mod tests {
         let cli = parse_from(argv(&["hat", "shell", "42", "--kill"])).expect("parse");
         assert!(matches!(
             cli.command,
-            Some(Command::Shell { id: Some(id), path: None, kill: true, args, open: None }) if id == "42" && args.is_empty()
+            Some(Command::Shell { id: Some(id), path: None, kill: true, kill_connections: false, args, open: None }) if id == "42" && args.is_empty()
         ));
     }
 
@@ -553,6 +607,7 @@ mod tests {
                 id: Some(id),
                 path: Some(path),
                 kill: false,
+                kill_connections: false,
                 open: None,
                 ref args,
             }) if id == "new" && path == PathBuf::from(".") && args.is_empty()
@@ -561,6 +616,41 @@ mod tests {
         assert!(parse_from(argv(&["hat", "sh", "new", "."])).is_err());
         assert!(parse_from(argv(&["hat", "sh", "new", "--path", ".", "echo"])).is_err());
         assert!(parse_from(argv(&["hat", "sh", "new", "--path", ".", "--kill"])).is_err());
+        assert!(
+            parse_from(argv(&[
+                "hat",
+                "sh",
+                "new",
+                "--path",
+                ".",
+                "--kill-connections"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shell_subcommand_parses_kill_connections_flag() {
+        let cli = parse_from(argv(&["hat", "sh", "42", "--kill-connections"])).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shell {
+                id: Some(id),
+                path: None,
+                kill: false,
+                kill_connections: true,
+                args,
+                open: None,
+            }) if id == "42" && args.is_empty()
+        ));
+        assert!(
+            CliOptions::try_parse_from(argv(&["hat", "sh", "42", "--kill", "--kill-connections"]))
+                .is_err()
+        );
+        assert!(
+            CliOptions::try_parse_from(argv(&["hat", "sh", "42", "--kill-connections", "pwd"]))
+                .is_err()
+        );
     }
 
     #[test]
@@ -646,6 +736,32 @@ mod tests {
             Some(Command::Approvals {
                 command: ApprovalCommand::Trust { id }
             }) if id == "7"
+        ));
+    }
+
+    #[test]
+    fn rules_subcommands_parse() {
+        assert!(matches!(
+            parse_from(argv(&["hat", "rules", "status", "--workspace", "api", "--json"]))
+                .unwrap()
+                .command,
+            Some(Command::Rules {
+                command: RulesCommand::Status {
+                    workspace: Some(workspace),
+                    json: true,
+                }
+            }) if workspace == "api"
+        ));
+        assert!(matches!(
+            parse_from(argv(&["hat", "rules", "trust", "--global"]))
+                .unwrap()
+                .command,
+            Some(Command::Rules {
+                command: RulesCommand::Trust {
+                    global: true,
+                    workspace: None,
+                }
+            })
         ));
     }
 }

@@ -94,6 +94,16 @@ impl App {
                 KeyCode::Char('r') | KeyCode::Char('R') => self.approve_net_forever(0),
                 KeyCode::Char('n') | KeyCode::Char('N') => self.deny_net(0),
                 KeyCode::Char('d') | KeyCode::Char('D') => self.deny_net_forever(0),
+                KeyCode::Char('x') | KeyCode::Char('X') => {
+                    let session_token = self.pending_net[0].source_session_token.clone();
+                    if let Some(session_idx) = session_token.and_then(|token| {
+                        self.sessions
+                            .iter()
+                            .position(|session| session.session_token == token)
+                    }) {
+                        self.kill_network_connections_for_session(session_idx);
+                    }
+                }
                 _ => {}
             }
             return;
@@ -518,6 +528,9 @@ impl App {
                 if let Some(id) = self.selected_network_activity_id(si) {
                     self.cancel_activity(&id);
                 }
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                self.kill_network_connections_for_session(si);
             }
             _ => {}
         }

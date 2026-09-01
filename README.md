@@ -35,14 +35,35 @@ Inside the workspace, the agent gets a real shell, a real toolchain, and read-wr
 
 ## Quick start
 
-Prerequisites: [Docker](https://docs.docker.com/get-docker/) is running and Rust/Cargo is installed.
-
 ### 1. Install
 
+The unattended installers provision Docker when it is missing, install the
+matching release archive, and register the per-user Harness Hat agent. They
+select the latest release by default; use `--version vX.Y.Z` (or `-Version
+vX.Y.Z` on Windows) to pin one.
+
 ```sh
-cargo install harness-hat
-hat install
+# macOS
+curl -fsSL https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-macos.sh | bash
+
+# Linux desktop
+curl -fsSL https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-linux.sh | bash
+
+# Linux server
+curl -fsSL https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-linux.sh | bash -s -- --headless
 ```
+
+Run the Windows installer from a saved PowerShell script so it can elevate for
+WSL and Docker Desktop setup:
+
+```powershell
+$installer = Join-Path $env:TEMP 'install-harness-hat.ps1'
+Invoke-WebRequest https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-windows.ps1 -OutFile $installer
+& $installer
+```
+
+Existing installations are preserved by default. Add `--force` (or `-Force` on
+Windows) to replace the two binaries and re-register the background agent.
 
 ### 2. CD to your project
 
@@ -89,7 +110,7 @@ The result is a consistent outer policy layer that works across agents:
 | Edit project files                                      | Network requests follow project rules        |
 | Run compilers, tests, and package managers              | Unknown destinations can require approval    |
 | Install tools inside the container                      | Host commands must use `hostdo`              |
-| Use Codex, Claude Code, Antigravity, Pi, or another CLI | Remembered decisions become reviewable rules |
+| Use Codex, Claude Code, Antigravity, Pi, OpenCode, or another CLI | Remembered decisions become reviewable rules |
 
 Agent-specific permission prompts can still be used. Harness Hat also includes convenience wrappers such as `codex-yolo`, `claude-yolo`, `agy-yolo`, and `omp-yolo` when you want Harness Hat to serve as the outer approval layer.
 
@@ -202,6 +223,7 @@ The base currently includes:
 * Google Antigravity CLI
 * Pi coding agent
 * oh-my-pi
+* OpenCode
 * `hostdo` and `killme`
 * Git, Node.js, Python, ripgrep, ast-grep, zsh, and common development utilities
 
@@ -209,7 +231,7 @@ Built-in Dockerfile templates cover:
 
 | Template     | Environment                                                          |
 | ------------ | -------------------------------------------------------------------- |
-| `default`    | Node.js, npm, Bun, pnpm, and TypeScript                              |
+| `default`    | TypeScript, Node.js, Bun, pnpm, Playwright Chromium, and agent-browser |
 | `typescript` | TypeScript, Node.js, Bun, Vite, ESLint, Prettier, and nodemon        |
 | `python`     | Python and `uv`                                                      |
 | `rust`       | Rust, Cargo, rust-analyzer, Clippy, nextest, audit, and deny tooling |
@@ -261,6 +283,20 @@ hat approvals trust 17
 
 An attached `hat` TUI can also decide queued approvals. Unknown requests remain fail-closed while waiting, and changed rules files require the explicit `trust` command rather than allow/deny.
 
+If a reviewed rules change remains blocked after its alert has been handled, inspect
+the daemon's effective state and explicitly trust one current file:
+
+```sh
+hat rules status
+hat rules status --workspace my-project --json
+hat rules trust --workspace my-project
+hat rules trust --global
+```
+
+The workspace Settings pane offers the same inspect and trust actions. Trusting
+is deliberately per-file and records only the contents currently on disk; any
+later change blocks policy decisions again.
+
 The CLI becomes a lightweight client:
 
 ```sh
@@ -272,10 +308,13 @@ hat ws --new            # force a fresh session for the current directory
 hat ws open codium      # open the current workspace session in a PATH editor
 hat sh                 # list active sessions
 hat sh 42              # attach to a session
+hat sh 42 --kill-connections # drop that session's currently-open network connections
 hat sh 42 --kill       # stop and remove a session
 hat sh 42 open codium  # open the session in a PATH editor
 hat sh new --path .    # launch a fresh session and print its integer ID
-hat rebuild rust       # rebuild the base and Rust images
+hat rebuild            # rebuild the base and already-built template images
+hat rebuild --all      # rebuild the base and every template image
+hat rebuild rust       # rebuild the base and Rust image
 hat restart            # reload config and policy without stopping sessions
 ```
 
@@ -312,7 +351,7 @@ Harness Hat rejects obviously dangerous workspace and mount sources, including b
 * macOS, Linux with systemd user services, or Windows
 * Docker Engine or Docker Desktop
 * Linux containers on Windows
-* Rust 1.89 or newer and Cargo for installation from crates.io
+* Rust 1.89 or newer and Cargo only when building or installing from crates.io
 * a signed-in graphical desktop user for the default `hat install`, or a Linux user with systemd user services and `loginctl` for `hat install --headless`
 
 Run Harness Hat as your normal user. Do not use `sudo` for `hat install` or `hat uninstall`.

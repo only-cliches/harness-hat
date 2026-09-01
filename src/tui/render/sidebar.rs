@@ -374,7 +374,7 @@ pub(crate) fn render_network_group_detail(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         if focused {
-            "  [↑↓/jk] Select request   [^C] Cancel selected   [Esc/^B] Back to sidebar"
+            "  [↑↓/jk] Select request   [^C] Cancel selected   [x] Kill all connections   [Esc/^B] Back"
         } else {
             "  [↵/l] Open network list   [Esc/^B] Back to sidebar"
         },

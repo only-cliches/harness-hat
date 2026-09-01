@@ -75,6 +75,11 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
     let (tui_tx, tui_rx) = mpsc::channel::<crate::server::TuiFrameItem>(8);
 
     let session_registry = crate::server::SessionRegistry::default();
+    // Shared factory and registry for authenticated, per-session listeners.
+    // Construct it before the control server so the disconnect endpoint and
+    // the TUI operate on the same live connection trackers.
+    let proxy_state =
+        crate::proxy::ProxyState::new(shared_config.clone(), net_pending_tx, activity_tx.clone())?;
 
     let control_port = config.defaults.control.server_port;
     let control_host = config.defaults.control.server_host.clone();
@@ -108,6 +113,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
         tui_tx,
         tui_events: tui_events.clone(),
         docker_status: docker_status.clone(),
+        proxy_state: proxy_state.clone(),
     };
     let control_listener = tokio::net::TcpListener::bind(&control_addr)
         .await
@@ -155,12 +161,6 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
              set defaults.control.allow_remote_control = true to opt in to remote-reachable bindings"
         );
     }
-    // `ProxyState` is a factory for authenticated, per-session listeners. Do
-    // not bind the legacy root proxy: it accepted spoofable source metadata and
-    // became remotely reachable when remote control was enabled.
-    let proxy_state =
-        crate::proxy::ProxyState::new(shared_config.clone(), net_pending_tx, activity_tx)?;
-
     // The TUI runs on its own thread with a dedicated current-thread runtime:
     // App owns ContainerSession (whose Box<dyn MasterPty> is !Send), so it
     // must be built and driven on a single thread — but that thread must not

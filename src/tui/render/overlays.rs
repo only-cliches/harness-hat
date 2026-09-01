@@ -251,7 +251,14 @@ pub(crate) fn render_net_approval_overlay(frame: &mut Frame, app: &App, area: Re
             "D ",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Always deny", Style::default().fg(Color::White)),
+        Span::styled("Always deny  ", Style::default().fg(Color::White)),
+        Span::styled(
+            "X ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Kill connections", Style::default().fg(Color::White)),
     ]);
 
     let queue_total = app.pending_net.len();

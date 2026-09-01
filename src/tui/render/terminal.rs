@@ -400,7 +400,7 @@ pub(crate) fn render_session_detail(
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  [k] stop container  [Esc/^B] sidebar",
+            "  [k] stop container  [x] kill network connections  [Esc/^B] sidebar",
             Style::default().fg(tone(Color::DarkGray)),
         )),
     ]);

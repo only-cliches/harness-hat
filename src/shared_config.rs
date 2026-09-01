@@ -1,5 +1,6 @@
 use crate::config::Config;
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -26,6 +27,23 @@ enum RulesFileFingerprint {
 struct GuardedRulesFile {
     trusted: Option<RulesFileFingerprint>,
     blocked: bool,
+}
+
+/// A configured policy file and the daemon's current trust decision for it.
+/// Paths are derived from the active configuration; callers never supply an
+/// arbitrary filesystem path to the rules guard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RulesFileScope {
+    Global,
+    Workspace { workspace: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RulesFileStatus {
+    pub scope: RulesFileScope,
+    pub path: String,
+    pub blocked: bool,
 }
 
 #[derive(Default)]
@@ -107,6 +125,61 @@ impl SharedConfig {
         let current = rules_file_fingerprint(path)?;
         self.set_trusted_rules_file(path, current);
         Ok(())
+    }
+
+    /// Report the effective trust state for the configured global file and,
+    /// when selected, the matching workspace file. Inspection deliberately
+    /// refreshes the guard: a change noticed between filesystem-watch ticks
+    /// must still be reported as blocked rather than stale/trusted.
+    pub fn rules_status(&self, workspace_name: Option<&str>) -> Result<Vec<RulesFileStatus>> {
+        let config = self.get();
+        let mut targets = vec![(
+            RulesFileScope::Global,
+            config.manager.global_rules_file.clone(),
+        )];
+        if let Some(workspace_name) = workspace_name {
+            let workspace = config
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.name == workspace_name)
+                .ok_or_else(|| anyhow::anyhow!("no workspace named {workspace_name:?}"))?;
+            targets.push((
+                RulesFileScope::Workspace {
+                    workspace: workspace.name.clone(),
+                },
+                workspace.canonical_path.join("harness-rules.toml"),
+            ));
+        } else {
+            targets.extend(config.workspaces.iter().map(|workspace| {
+                (
+                    RulesFileScope::Workspace {
+                        workspace: workspace.name.clone(),
+                    },
+                    workspace.canonical_path.join("harness-rules.toml"),
+                )
+            }));
+        }
+
+        let mut guard = self.rules_guard.write().unwrap_or_else(|e| e.into_inner());
+        let mut statuses = Vec::with_capacity(targets.len());
+        for (scope, path) in targets {
+            let current = rules_file_fingerprint(&path);
+            let entry = guard.files.entry(path.clone()).or_insert(GuardedRulesFile {
+                trusted: None,
+                blocked: true,
+            });
+            let blocked = match current {
+                Ok(current) => entry.blocked || entry.trusted.as_ref() != Some(&current),
+                Err(_) => true,
+            };
+            entry.blocked = blocked;
+            statuses.push(RulesFileStatus {
+                scope,
+                path: path.display().to_string(),
+                blocked,
+            });
+        }
+        Ok(statuses)
     }
 
     /// Trust an internal write only when the file still contains the exact
@@ -234,7 +307,7 @@ fn read_rules_file_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, WorkspaceConfig};
     use std::{fs, sync::Arc};
 
     #[test]
@@ -292,6 +365,45 @@ mod tests {
 
         shared.trust_rules_file(&rules_path).unwrap();
         shared.ensure_rules_trusted_for_workspace(None).unwrap();
+    }
+
+    #[test]
+    fn status_and_trust_are_scoped_to_one_rules_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_rules = dir.path().join("global-rules.toml");
+        let workspace_dir = dir.path().join("workspace");
+        fs::create_dir(&workspace_dir).unwrap();
+        let workspace_rules = workspace_dir.join("harness-rules.toml");
+        fs::write(&global_rules, "[network]\ndefault_policy = 'prompt'\n").unwrap();
+        fs::write(&workspace_rules, "[network]\ndefault_policy = 'prompt'\n").unwrap();
+        let config = Arc::new(Config {
+            manager: crate::config::ManagerConfig {
+                global_rules_file: global_rules.clone(),
+            },
+            workspaces: vec![WorkspaceConfig {
+                name: "api".to_string(),
+                canonical_path: workspace_dir,
+                sidebar_hotkey: None,
+                template: None,
+                mount_cwd: false,
+            }],
+            ..Config::default()
+        });
+        let shared = SharedConfig::new(config);
+
+        fs::write(&workspace_rules, "[network]\ndefault_policy = 'deny'\n").unwrap();
+        let status = shared.rules_status(Some("api")).unwrap();
+        assert!(!status[0].blocked, "global rules stay trusted");
+        assert!(status[1].blocked, "changed workspace rules are blocked");
+
+        shared.trust_rules_file(&workspace_rules).unwrap();
+        let status = shared.rules_status(Some("api")).unwrap();
+        assert!(status.iter().all(|rule| !rule.blocked));
+
+        fs::write(&global_rules, "[network]\ndefault_policy = 'deny'\n").unwrap();
+        let status = shared.rules_status(Some("api")).unwrap();
+        assert!(status[0].blocked, "changed global rules are blocked");
+        assert!(!status[1].blocked, "workspace trust remains intact");
     }
 
     #[test]

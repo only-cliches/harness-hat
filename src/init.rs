@@ -250,6 +250,7 @@ mod tests {
             ("~/.claude", "/home/coder/.claude"),
             ("~/.codex", "/home/coder/.codex"),
             ("~/.config/codex", "/home/coder/.config/codex"),
+            ("~/.config/opencode", "/home/coder/.config/opencode"),
             // Antigravity CLI stores auth, settings, and conversations under
             // ~/.gemini/antigravity-cli, so the broader Gemini state root is
             // still the correct passthrough mount after migrating from Gemini CLI.
@@ -383,6 +384,8 @@ mod tests {
 
         let content = std::fs::read_to_string(path).expect("read default dockerfile");
         assert!(content.contains("harness-hat default image"));
+        assert!(content.contains("PLAYWRIGHT_BROWSERS_PATH"));
+        assert!(content.contains("agent-browser"));
     }
 
     #[test]

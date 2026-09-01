@@ -71,12 +71,14 @@ async fn main() -> Result<()> {
             id,
             path,
             kill,
+            kill_connections,
             args,
             open,
         }) => {
-            // Existing-session actions are a pure-Docker passthrough and
-            // intentionally bypass manager initialization. The reserved
-            // `new` action uses the workspace launcher to create a session.
+            // Existing-session discovery and normal actions bypass manager
+            // initialization. `--kill-connections` contacts the owning
+            // manager using control metadata from the selected container. The
+            // reserved `new` action uses the workspace launcher.
             if id.as_deref() == Some("new") {
                 let path = path.expect("cli validation requires sh new --path");
                 let code = tokio::task::spawn_blocking(move || {
@@ -102,7 +104,7 @@ async fn main() -> Result<()> {
                 harness_hat::shell::open(&id, editor)?;
                 return Ok(());
             }
-            let code = harness_hat::shell::run(id, kill, args)?;
+            let code = harness_hat::shell::run(id, kill, kill_connections, args)?;
             std::process::exit(code);
         }
         Some(Command::Workspace {
@@ -132,9 +134,10 @@ async fn main() -> Result<()> {
         }
         Some(Command::Rebuild {
             no_cache,
+            all,
             templates,
         }) => {
-            harness_hat::rebuild::run(templates, no_cache, None)?;
+            harness_hat::rebuild::run(templates, all, no_cache, None)?;
         }
         Some(Command::Restart) => {
             tokio::task::spawn_blocking(harness_hat::workspace::restart)
@@ -148,6 +151,11 @@ async fn main() -> Result<()> {
             tokio::task::spawn_blocking(move || harness_hat::approvals::run(command))
                 .await
                 .context("approvals task panicked")??;
+        }
+        Some(Command::Rules { command }) => {
+            tokio::task::spawn_blocking(move || harness_hat::rules_control::run(command))
+                .await
+                .context("rules task panicked")??;
         }
         Some(Command::Uninstall) => {
             harness_hat::service::uninstall()?;

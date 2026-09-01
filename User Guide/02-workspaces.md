@@ -99,7 +99,7 @@ hat ws --name my-project --template python
 hat rebuild --no-cache
 ```
 
-> **Expected result:** Docker rebuilds the base image and every template. New sessions use the refreshed image; existing sessions keep their current image until they are restarted.
+> **Expected result:** Docker rebuilds the base image and every template image that already exists locally. Add `--all` (`hat rebuild --no-cache --all`) to include templates that have not been built yet. New sessions use the refreshed image; existing sessions keep their current image until they are restarted.
 
 This refresh updates tools and packages installed by the Dockerfiles. It does not update project dependencies pinned by files such as `Cargo.lock`, `package-lock.json`, or `poetry.lock`.
 

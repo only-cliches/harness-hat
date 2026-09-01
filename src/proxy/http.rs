@@ -242,6 +242,10 @@ pub(crate) async fn prompt_network(
         cancel_flag,
         source_workspace,
         source_container,
+        source_session_token: state
+            .fixed_source
+            .as_ref()
+            .map(|source| source.auth_token.clone()),
         source_status: source_status.to_string(),
         has_proxy_authorization,
         method: method.to_string(),

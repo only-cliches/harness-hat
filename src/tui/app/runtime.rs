@@ -73,6 +73,18 @@ impl App {
         // before enqueueing new requests, so a finished dialog frees the
         // in-flight slot and the next pending item can be prompted this tick.
         self.drain_native_dialog_results();
+        // A session-wide network cut marks every connection's shared flag.
+        // Remove approval rows backed by those connections immediately so a
+        // dead request cannot leave a stale modal behind.
+        for idx in (0..self.pending_net.len()).rev() {
+            if self.pending_net[idx]
+                .cancel_flag
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                self.deny_net(idx);
+                changed = true;
+            }
+        }
         for _ in 0..32 {
             match self.net_pending_rx.try_recv() {
                 Ok(item) => {
@@ -129,6 +141,18 @@ impl App {
                     changed = true;
                 }
                 Err(_) => break,
+            }
+        }
+        for activity in &mut self.activities {
+            if matches!(activity.kind, crate::activity::ActivityKind::Network { .. })
+                && !activity.state.is_terminal()
+                && activity.is_cancelled()
+            {
+                activity.state = crate::activity::ActivityState::Cancelled;
+                activity.status = Some("session network connections killed".to_string());
+                activity.updated_at = std::time::Instant::now();
+                activity.finished_at = Some(activity.updated_at);
+                changed = true;
             }
         }
 
@@ -663,10 +687,10 @@ fn pending_network_merge_key_matches(
     right: &crate::proxy::PendingNetworkItem,
 ) -> bool {
     left.source_workspace == right.source_workspace
-        && left.method.eq_ignore_ascii_case(&right.method)
+        && left.source_session_token == right.source_session_token
+        && left.source_container == right.source_container
         && left.host.eq_ignore_ascii_case(&right.host)
         && left.port == right.port
-        && left.path == right.path
 }
 
 /// Stable key used to count "how many pending approvals does this source
@@ -681,4 +705,51 @@ fn pending_network_source_key(item: &crate::proxy::PendingNetworkItem) -> String
         return format!("container:{container}");
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod pending_network_merge_tests {
+    use super::*;
+
+    fn pending(
+        session: &str,
+        method: &str,
+        host: &str,
+        port: u16,
+        path: &str,
+    ) -> crate::proxy::PendingNetworkItem {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        crate::proxy::PendingNetworkItem {
+            approval_id: String::new(),
+            activity_id: uuid::Uuid::new_v4().to_string(),
+            cancel_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            source_workspace: Some("workspace".to_string()),
+            source_container: Some("rust".to_string()),
+            source_session_token: Some(session.to_string()),
+            source_status: "listener_bound_source".to_string(),
+            has_proxy_authorization: true,
+            method: method.to_string(),
+            host: host.to_string(),
+            port: Some(port),
+            path: path.to_string(),
+            response_tx,
+            merged_response_txs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repeated_domain_requests_merge_across_methods_and_paths() {
+        let first = pending("one", "GET", "whatever.com", 443, "/one");
+        let repeated = pending("one", "POST", "WHATEVER.COM", 443, "/two");
+        assert!(pending_network_merge_key_matches(&first, &repeated));
+    }
+
+    #[test]
+    fn domain_requests_do_not_merge_across_sessions_or_ports() {
+        let first = pending("one", "GET", "whatever.com", 443, "/one");
+        let other_session = pending("two", "GET", "whatever.com", 443, "/one");
+        let other_port = pending("one", "GET", "whatever.com", 8443, "/one");
+        assert!(!pending_network_merge_key_matches(&first, &other_session));
+        assert!(!pending_network_merge_key_matches(&first, &other_port));
+    }
 }

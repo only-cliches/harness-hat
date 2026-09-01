@@ -528,6 +528,11 @@ impl App {
                 self.preview_session = Some(new_si);
             }
             Err(e) => {
+                // The container launcher rolls back any Docker container it
+                // started but could not adopt. Remove the pre-launch registry
+                // entry as well: leaving it behind would authorize a token for
+                // a session that never became visible or usable in the TUI.
+                self.session_registry.remove(&session_token);
                 self.push_log(
                     format!("launch '{}' on '{}' failed: {e}", ctr.name, proj.name),
                     true,

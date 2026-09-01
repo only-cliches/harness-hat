@@ -105,7 +105,9 @@ pub(crate) fn move_wrapping_cursor(cursor: &mut usize, len: usize, direction: i8
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsAction {
-    ReloadRules,
+    InspectRules,
+    TrustWorkspaceRules,
+    TrustGlobalRules,
     RemoveWorkspace,
 }
 

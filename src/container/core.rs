@@ -297,12 +297,13 @@ impl ContainerSession {
 
     /// Every useful `hat sh` form for this session. Keep this list next to the
     /// session identity so the TUI and reconnect messages use the same ID.
-    pub fn shell_commands(&self) -> [String; 4] {
+    pub fn shell_commands(&self) -> [String; 5] {
         let base = self.shell_in_hint();
         [
             format!("{base}  [attach]"),
             format!("{base} <COMMAND...>  [run a command]"),
             format!("{base} open EDITOR  [open a VS Code-compatible editor]"),
+            format!("{base} --kill-connections  [drop current network connections]"),
             format!("{base} --kill  [stop the session]"),
         ]
     }

@@ -1,7 +1,8 @@
 use super::*;
 use crate::server::{
     ApprovalAction, ApprovalActionResponse, ApprovalControlError, ApprovalControlItem,
-    PendingApprovalRecord, PendingApprovalsResponse,
+    PendingApprovalRecord, PendingApprovalsResponse, RulesStatusResponse, RulesTrustResponse,
+    RulesTrustTarget,
 };
 
 impl App {
@@ -31,6 +32,21 @@ impl App {
                     response_tx,
                 }) => {
                     let result = self.decide_approval(&id, action);
+                    changed |= result.is_ok();
+                    let _ = response_tx.send(result);
+                }
+                Ok(ApprovalControlItem::RulesStatus {
+                    workspace,
+                    response_tx,
+                }) => {
+                    let result = self.rules_status(workspace.as_deref());
+                    let _ = response_tx.send(result);
+                }
+                Ok(ApprovalControlItem::TrustRules {
+                    target,
+                    response_tx,
+                }) => {
+                    let result = self.trust_rules_target(target);
                     changed |= result.is_ok();
                     let _ = response_tx.send(result);
                 }
@@ -225,6 +241,98 @@ impl App {
             format!("rules remain blocked until reviewed: {}", path.display()),
             true,
         );
+    }
+
+    fn rules_status(
+        &self,
+        workspace: Option<&str>,
+    ) -> std::result::Result<RulesStatusResponse, ApprovalControlError> {
+        self.config
+            .rules_status(workspace)
+            .map(|rules| RulesStatusResponse { rules })
+            .map_err(|error| ApprovalControlError {
+                code: if workspace.is_some() {
+                    "unknown_workspace"
+                } else {
+                    "rules_status_failed"
+                },
+                reason: error.to_string(),
+            })
+    }
+
+    pub(crate) fn trust_rules_target(
+        &mut self,
+        target: RulesTrustTarget,
+    ) -> std::result::Result<RulesTrustResponse, ApprovalControlError> {
+        let cfg = self.config.get();
+        let (path, description) = match target {
+            RulesTrustTarget::Global => (
+                cfg.manager.global_rules_file.clone(),
+                "global rules".to_string(),
+            ),
+            RulesTrustTarget::Workspace { workspace } => {
+                let workspace = cfg
+                    .workspaces
+                    .iter()
+                    .find(|candidate| candidate.name == workspace)
+                    .ok_or_else(|| ApprovalControlError {
+                        code: "unknown_workspace",
+                        reason: format!("no workspace named {workspace:?}"),
+                    })?;
+                (
+                    workspace.canonical_path.join("harness-rules.toml"),
+                    format!("rules for workspace '{}'", workspace.name),
+                )
+            }
+        };
+
+        self.config
+            .trust_rules_file(&path)
+            .map_err(|error| ApprovalControlError {
+                code: "rules_changed",
+                reason: error.to_string(),
+            })?;
+
+        // The explicit command trusts the bytes present now. Make the
+        // filesystem watcher regard those same bytes as its new baseline, or
+        // its next scan would recreate the just-cleared block and alert.
+        self.watched_rules_stamps
+            .insert(path.clone(), Self::watched_file_stamp(&path));
+        self.pending_base_rules_internal_write.remove(&path);
+        if self
+            .base_rules_changed
+            .as_ref()
+            .is_some_and(|item| item.path == path)
+        {
+            self.base_rules_changed = None;
+        }
+        self.push_log(
+            format!("trusted current {description}: {}", path.display()),
+            false,
+        );
+
+        let rule = self
+            .config
+            .rules_status(None)
+            .map_err(|error| ApprovalControlError {
+                code: "rules_status_failed",
+                reason: error.to_string(),
+            })?
+            .into_iter()
+            .find(|rule| rule.path == path.display().to_string())
+            .ok_or_else(|| ApprovalControlError {
+                code: "not_found",
+                reason: format!(
+                    "trusted rules file is no longer configured: {}",
+                    path.display()
+                ),
+            })?;
+
+        Ok(RulesTrustResponse {
+            ok: true,
+            message: format!("trusted current {description}: {}", path.display()),
+            rule,
+        })
     }
 }
 

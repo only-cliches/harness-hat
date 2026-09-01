@@ -131,6 +131,8 @@ image = "default"
         .expect("write nested claude json");
     std::fs::create_dir_all(root.path().join(".codex")).expect("create codex dir");
     std::fs::create_dir_all(root.path().join(".config/codex")).expect("create config codex dir");
+    std::fs::create_dir_all(root.path().join(".config/opencode"))
+        .expect("create OpenCode config dir");
     std::fs::create_dir_all(root.path().join(".gemini")).expect("create gemini dir");
     std::fs::create_dir_all(root.path().join(".pi")).expect("create pi dir");
 
@@ -165,6 +167,10 @@ image = "default"
         (home.join(".claude"), "/home/coder/.claude"),
         (home.join(".codex"), "/home/coder/.codex"),
         (home.join(".config/codex"), "/home/coder/.config/codex"),
+        (
+            home.join(".config/opencode"),
+            "/home/coder/.config/opencode",
+        ),
         (home.join(".gemini"), "/home/coder/.gemini"),
         (home.join(".pi"), "/home/coder/.pi"),
     ];

@@ -745,6 +745,9 @@ fn shared_session_state_mounts() -> Result<Vec<ContainerMount>> {
         ("~/.claude", "/home/coder/.claude"),
         ("~/.codex", "/home/coder/.codex"),
         ("~/.config/codex", "/home/coder/.config/codex"),
+        // OpenCode keeps global settings, agents, commands, and plugins under
+        // ~/.config/opencode.
+        ("~/.config/opencode", "/home/coder/.config/opencode"),
         // Antigravity CLI keeps session/config data in ~/.gemini/antigravity-cli.
         // Mount the root so migrated Gemini CLI state remains available too.
         ("~/.gemini", "/home/coder/.gemini"),

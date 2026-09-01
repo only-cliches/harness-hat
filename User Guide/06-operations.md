@@ -16,6 +16,7 @@ hat ws --new                     # force a fresh session for the current directo
 hat ws open codium               # open the current workspace session in a PATH editor
 hat sh                           # list active sessions
 hat sh <ID>                      # attach to a session
+hat sh <ID> --kill-connections   # drop the session's currently-open network connections
 hat sh <ID> --kill               # stop and remove a session
 hat sh <ID> open codium          # open the session in a PATH editor
 hat sh new --path .              # launch a fresh session and print its ID
@@ -40,7 +41,7 @@ In short: use `hat sh <ID>` when you know the global session ID, and use `hat ws
 
 The attached TUI is rendered by `hat-daemon`, so its workspace, session, terminal, build, settings, and approval behavior is the same as the standalone manager. When the service is not installed or running, `hat` starts the standalone manager instead.
 
-Run `killme` in a **session terminal** to request that Harness Hat stops that session. From a **terminal**, `hat sh <ID> --kill` stops and removes a session listed by `hat sh`.
+Run `killme` in a **session terminal** to request that Harness Hat stops that session. From a **terminal**, `hat sh <ID> --kill` stops and removes a session listed by `hat sh`. Use `hat sh <ID> --kill-connections` to close all network connections currently passing through that session's authenticated proxy without stopping the container. This is a transient cut: later connections can open again under the normal network policy. In the TUI, open a session or its Network list and press `x`.
 
 ## Refresh the daemon without losing sessions
 
@@ -88,7 +89,23 @@ hat sh <ID> claude-yolo
 
 Unknown outbound hosts are policy checked. A project rule can allow or deny a host, method, path, or port. Prefer exact rules over broad wildcards, and review every remembered permission in version control.
 
+While an approval for a domain and port is pending, repeated requests from the same session to that domain and port are folded into the existing approval. Different paths or HTTP methods therefore do not create repeated modals; the eventual decision is delivered to every folded request. Requests from another session or to another port remain separate.
+
 If a rules-file change alert appears, inspect the changed global or project `harness-rules.toml`. New network and `hostdo` decisions stay blocked until the version shown by the alert is trusted. Closing the dialog remains blocked.
+
+If a reviewed file appears to remain blocked, inspect the daemon's effective
+guard state and explicitly trust the current reviewed file. This does not
+approve requests or bypass policy; a later edit blocks it again.
+
+```sh
+hat rules status
+hat rules trust --workspace my-project
+# or, for the global policy file:
+hat rules trust --global
+```
+
+In the TUI, open a workspace's Settings pane and use **Inspect rules status**,
+**Trust workspace rules**, or **Trust global rules**.
 
 ## Inspect Active Requests
 
@@ -105,9 +122,10 @@ Run these commands in a **terminal**:
 ```sh
 hat rebuild
 hat rebuild --no-cache python
+hat rebuild --all
 ```
 
-> **Expected result:** Docker prints build progress for the base image and the selected templates. A new session launched after a successful build uses the rebuilt image; existing sessions do not change.
+> **Expected result:** Docker prints build progress for the base image and previously built templates. Use `--all` to include every configured template, or name a template to rebuild it explicitly. A new session launched after a successful build uses the rebuilt image; existing sessions do not change.
 
 Use `hat ws --rebuild` for a one-off cache-bypassing rebuild before launch.
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.8 Future
+
+### Added
+
+- The default TypeScript image now includes Playwright-provisioned headless Chromium, `agent-browser`, and its Codex skill for browser automation without a second browser download.
+- Added OpenCode to the shared base image and mounted its `~/.config/opencode` settings, agents, commands, and plugins into sessions.
+- Added `hat rules status [--workspace NAME] [--json]` plus explicit per-file recovery commands: `hat rules trust --workspace NAME` and `hat rules trust --global`. Workspace Settings now expose the equivalent inspect and trust actions.
+- Added `hat sh ID --kill-connections` and the matching TUI `x` action to drop all currently open proxy connections for a running session. The container keeps running, and later connections remain subject to normal network policy.
+
+### Changed
+
+- Updated the bundled Codex (0.149.1), Pi (0.84.2), OpenCode (1.18.21), Antigravity (1.1.19), and oh-my-pi (18.0.4) CLIs to their current pinned releases.
+- Changed `hat rebuild` so that, when no templates are named, it rebuilds only template images that already exist locally. Explicit template names still force those templates to rebuild, while `hat rebuild --all` rebuilds every configured template.
+- Folded repeated pending network requests for the same session, domain, and port into one approval prompt, even when their HTTP methods or paths differ. Requests from other sessions or to other ports remain separate.
+
+### Fixed
+
+- Container launch now rolls back any Docker container that starts but cannot be adopted into a TUI session, and removes its provisional session authorization. Failed launches no longer leave an unmanaged container with no scoped proxy/network access.
+- Explicit rules recovery clears a matching stale rules-change alert and synchronizes the rules watcher baseline, so a reviewed file trusted through the TUI or CLI is not immediately blocked again.
+
 ## 0.8.7 Aug 14, 2026
 
 ### Added

@@ -994,6 +994,7 @@ mod tests {
             template: "dev".into(),
             name: String::new(),
             mount_target: None,
+            session_token: String::new(),
         };
         assert_eq!(mount_target_for_session(&legacy, &config), "/custom");
         let unknown = crate::shell::Session {

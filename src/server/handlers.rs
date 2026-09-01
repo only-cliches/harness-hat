@@ -18,6 +18,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tracing::{instrument, warn};
 
 use crate::activity::ActivityEvent;
+use crate::shared_config::RulesFileStatus;
 use crate::shared_config::SharedConfig;
 use crate::state::{AuditEntry, DecisionKind, StateManager};
 
@@ -234,6 +235,38 @@ pub struct ApprovalControlError {
     pub reason: String,
 }
 
+/// Query accepted by `GET /rules`.
+#[derive(Debug, Deserialize)]
+pub struct RulesStatusQuery {
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RulesStatusResponse {
+    pub rules: Vec<RulesFileStatus>,
+}
+
+/// One explicitly addressable configured rules-file scope. This prevents the
+/// host CLI from naming arbitrary paths for trust operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum RulesTrustTarget {
+    Global,
+    Workspace { workspace: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesTrustRequest {
+    pub target: RulesTrustTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RulesTrustResponse {
+    pub ok: bool,
+    pub rule: RulesFileStatus,
+    pub message: String,
+}
+
 pub enum ApprovalControlItem {
     List {
         response_tx: oneshot::Sender<PendingApprovalsResponse>,
@@ -243,6 +276,15 @@ pub enum ApprovalControlItem {
         action: ApprovalAction,
         response_tx:
             oneshot::Sender<std::result::Result<ApprovalActionResponse, ApprovalControlError>>,
+    },
+    RulesStatus {
+        workspace: Option<String>,
+        response_tx:
+            oneshot::Sender<std::result::Result<RulesStatusResponse, ApprovalControlError>>,
+    },
+    TrustRules {
+        target: RulesTrustTarget,
+        response_tx: oneshot::Sender<std::result::Result<RulesTrustResponse, ApprovalControlError>>,
     },
 }
 
@@ -503,6 +545,13 @@ pub struct StopResponse {
     pub ok: bool,
 }
 
+/// Response returned after cutting a session's currently-open proxy sockets.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetworkDisconnectResponse {
+    pub ok: bool,
+    pub connections_killed: usize,
+}
+
 /// Represents the identity of a running container session.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
@@ -556,6 +605,7 @@ pub struct ServerState {
     pub tui_tx: mpsc::Sender<TuiFrameItem>,
     pub tui_events: TuiEventBroker,
     pub docker_status: crate::container::DockerStatus,
+    pub proxy_state: crate::proxy::ProxyState,
 }
 
 /// A frame request from the foreground `hat` terminal. The daemon owns the
@@ -740,10 +790,16 @@ pub async fn run_with_listener(
     // via `tokio::time::timeout` and `control_concurrency_semaphore()`.
     let router = Router::new()
         .route("/container/stop", post(stop_handler))
+        .route(
+            "/container/network/disconnect",
+            post(network_disconnect_handler),
+        )
         .route("/workspace/launch", post(workspace_launch_handler))
         .route("/daemon/restart", post(daemon_restart_handler))
         .route("/approvals", get(approvals_list_handler))
         .route("/approvals/{id}", post(approval_action_handler))
+        .route("/rules", get(rules_status_handler))
+        .route("/rules/trust", post(rules_trust_handler))
         .route("/tui/frame", post(tui_frame_handler))
         .route("/tui/events", get(tui_events_handler))
         .route("/exec", post(crate::server::core::exec_handler))
@@ -838,6 +894,76 @@ async fn approval_action_handler(
         }
         _ => manager_unavailable_response(),
     }
+}
+
+async fn rules_status_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<RulesStatusQuery>,
+) -> Response {
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    if state
+        .approval_tx
+        .send(ApprovalControlItem::RulesStatus {
+            workspace: query.workspace,
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return manager_unavailable_response();
+    }
+    match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(response))) => Json(response).into_response(),
+        Ok(Ok(Err(error))) => approval_control_error_response(error),
+        _ => manager_unavailable_response(),
+    }
+}
+
+async fn rules_trust_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<RulesTrustRequest>,
+) -> Response {
+    if let Err(response) = require_bearer(&state, &headers) {
+        return response;
+    }
+    let (response_tx, response_rx) = oneshot::channel();
+    if state
+        .approval_tx
+        .send(ApprovalControlItem::TrustRules {
+            target: request.target,
+            response_tx,
+        })
+        .await
+        .is_err()
+    {
+        return manager_unavailable_response();
+    }
+    match tokio::time::timeout(CONTROL_HANDLER_TIMEOUT, response_rx).await {
+        Ok(Ok(Ok(response))) => Json(response).into_response(),
+        Ok(Ok(Err(error))) => approval_control_error_response(error),
+        _ => manager_unavailable_response(),
+    }
+}
+
+fn approval_control_error_response(error: ApprovalControlError) -> Response {
+    let status = match error.code {
+        "invalid_id" | "unknown_workspace" => StatusCode::BAD_REQUEST,
+        "not_found" => StatusCode::NOT_FOUND,
+        _ => StatusCode::CONFLICT,
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.code.to_string(),
+            reason: error.reason,
+        }),
+    )
+        .into_response()
 }
 
 fn manager_unavailable_response() -> Response {
@@ -1142,6 +1268,31 @@ pub(super) async fn stop_handler(
     }
 }
 
+pub(super) async fn network_disconnect_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    let (session_token, _identity) = match require_session_context(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    match state.proxy_state.kill_current_connections(&session_token) {
+        Some(connections_killed) => Json(NetworkDisconnectResponse {
+            ok: true,
+            connections_killed,
+        })
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".into(),
+                reason: "no active network listener matched the session".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 /// Buffer for the NDJSON event stream. 64 entries leaves comfortable
 /// headroom for fast `docker build` output bursts (one line per send) without
 /// risking unbounded growth if the CLI is slow to read.
@@ -1410,6 +1561,7 @@ mod tests {
         let (audit_tx, _audit_rx) = mpsc::channel(1);
         let (activity_tx, _activity_rx) = mpsc::channel(16);
         let (tui_tx, _tui_rx) = mpsc::channel(1);
+        let (network_tx, _network_rx) = mpsc::channel(1);
         let state_dir =
             std::env::temp_dir().join(format!("harness-hat-state-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&state_dir).expect("create state dir");
@@ -1425,10 +1577,16 @@ mod tests {
             token: "token".to_string(),
             sessions: registry,
             exec_jobs,
-            activity_tx,
+            activity_tx: activity_tx.clone(),
             tui_tx,
             tui_events: TuiEventBroker::default(),
             docker_status: crate::container::DockerStatus::new(),
+            proxy_state: crate::proxy::ProxyState::new(
+                SharedConfig::new(Arc::new(crate::config::Config::default())),
+                network_tx,
+                activity_tx.clone(),
+            )
+            .expect("proxy state"),
         }
     }
 
@@ -1465,6 +1623,46 @@ mod tests {
 
         registry.remove("session");
         assert!(registry.get("session").is_none());
+    }
+
+    #[tokio::test]
+    async fn network_disconnect_requires_session_auth_and_cuts_registered_listener() {
+        let registry = SessionRegistry::default();
+        registry.insert(
+            "session".to_string(),
+            SessionIdentity {
+                workspace_name: "workspace".to_string(),
+                container_id: "container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let state = test_server_state(registry, ExecJobRegistry::default());
+        let _listener = crate::proxy::spawn_scoped_listener(
+            &state.proxy_state,
+            "127.0.0.1",
+            "workspace",
+            "rust",
+            "session",
+            crate::proxy::SourcePriority::Primary,
+        )
+        .expect("scoped listener");
+
+        let unauthorized =
+            network_disconnect_handler(State(Arc::new(state.clone())), HeaderMap::new()).await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let headers = HeaderMap::from_iter([
+            (
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer token"),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("x-harness-hat-session-token"),
+                HeaderValue::from_static("session"),
+            ),
+        ]);
+        let response = network_disconnect_handler(State(Arc::new(state)), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]

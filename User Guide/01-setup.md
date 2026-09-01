@@ -2,6 +2,44 @@
 
 [Guide index](README.md) | [Next: Workspaces](02-workspaces.md)
 
+## Automated installation (recommended)
+
+The unattended installers provision Docker when it is missing, install the
+appropriate Harness Hat release for the host CPU, add the binary directory to
+the signed-in user's PATH, and register the per-user background agent. They
+target macOS ARM64/AMD64, Linux ARM64/AMD64, and Windows AMD64.
+
+Run the macOS or Linux command from the one signed-in user who will use Harness
+Hat. The script requests elevation only for Docker setup. It preserves an
+existing Harness Hat installation unless `--force` is supplied; use
+`--version vX.Y.Z` to select a release instead of the latest.
+
+```sh
+# macOS
+curl -fsSL https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-macos.sh | bash
+
+# Linux desktop
+curl -fsSL https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-linux.sh | bash
+
+# Linux server: install the systemd user service without desktop dialogs
+curl -fsSL https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-linux.sh | bash -s -- --headless
+```
+
+On Windows, save the installer to a file so it can relaunch itself with the
+UAC elevation required for WSL 2 and Docker Desktop:
+
+```powershell
+$installer = Join-Path $env:TEMP 'install-harness-hat.ps1'
+Invoke-WebRequest https://raw.githubusercontent.com/only-cliches/harness-hat/main/scripts/install-windows.ps1 -OutFile $installer
+& $installer
+```
+
+Windows uses `-Version vX.Y.Z` and `-Force` instead of the shell flags. Docker
+may require a reboot, logout, or extra startup time; the installer still
+registers Harness Hat, which can be used once `docker version` succeeds.
+
+The remainder of this page documents the manual Cargo-based installation path.
+
 ## Step 1: Install Docker
 
 Run the following commands in a **terminal**.

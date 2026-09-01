@@ -86,12 +86,16 @@ pub(crate) fn status_bar_keys(app: &App) -> &'static str {
         Focus::Sidebar => {
             " [↑↓]navigate  [↵]select  [A-Z/0-9]workspace  [^D]delete workspace  [^C/^Q]quit"
         }
-        Focus::Terminal => " [drag]select  [⌘C/^⇧C]copy  [k]stop  [Esc/^B]sidebar  [^C/^Q]quit",
+        Focus::Terminal => {
+            " [drag]select  [⌘C/^⇧C]copy  [k]stop  [x]kill network  [Esc/^B]sidebar  [^C/^Q]quit"
+        }
         Focus::Activity if app.scroll_mode => {
             " SCROLL: [↑↓/jk]line  [PgUp/PgDn]page  [g/G]top/bottom  [Esc/q]exit scroll"
         }
         Focus::Activity => " [drag]select  [⌘C/^⇧C]copy  [^C]cancel  [Esc/^B]sidebar  [^Q]quit",
-        Focus::Network => " [↑↓/jk]select request  [^C]cancel selected  [Esc/^B]sidebar  [^Q]quit",
+        Focus::Network => {
+            " [↑↓/jk]select request  [^C]cancel selected  [x]kill all  [Esc/^B]sidebar  [^Q]quit"
+        }
         Focus::Settings => " [↑↓/jk]navigate  [↵/l]select  [^B]back  [^C/^Q]quit",
         Focus::WorkspaceActions => {
             " [↑↓/jk]navigate  [↵/l]select  [r]remove  [Esc/^B]back  [^C/^Q]quit"

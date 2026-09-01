@@ -1,9 +1,9 @@
 //! `hat sh` — operate on a running session.
 //!
-//! This is a pure-Docker passthrough: it discovers sessions purely from the
-//! discovery labels stamped at launch (`harness-hat.alias` etc.) and attaches
-//! with `docker exec`, never touching the proxy, control server, or config
-//! loading.
+//! Session discovery, attach, stop, and editor actions use Docker labels and
+//! commands directly. The explicit `--kill-connections` action uses control
+//! metadata from the selected container to ask the owning manager to cut that
+//! session's scoped proxy sockets.
 //!
 //! Sessions only exist while the manager is running. Each session container is
 //! launched as `docker run --rm -it` owned by the manager's PTY, so quitting
@@ -19,35 +19,50 @@ use std::io::{IsTerminal, Write};
 use std::process::Command;
 
 use crate::container::{
-    LABEL_ALIAS, LABEL_MOUNT_TARGET, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE, SHELL_HOME,
-    SHELL_USER, parse_docker_label,
+    LABEL_ALIAS, LABEL_MOUNT_TARGET, LABEL_SESSION, LABEL_SHELL, LABEL_TEMPLATE, LABEL_WORKSPACE,
+    SHELL_HOME, SHELL_USER, parse_docker_label,
 };
 
 /// Entry point for the `sh` subcommand. With an id, attaches to that
 /// session, optionally running `args` as a command instead of bash; `kill`
 /// terminates the named session instead of attaching; without an id, prints
-/// running sessions.
-pub fn run(id: Option<String>, kill: bool, args: Vec<OsString>) -> Result<i32> {
+/// running sessions. `kill_connections` transiently drops the selected
+/// session's currently-open proxy connections.
+pub fn run(
+    id: Option<String>,
+    kill: bool,
+    kill_connections: bool,
+    args: Vec<OsString>,
+) -> Result<i32> {
     if which::which("docker").is_err() {
         bail!(
             "docker not found in PATH — `{} sh` requires Docker",
             crate::cli::COMMAND_NAME
         );
     }
-    match (id, kill) {
-        (Some(id), true) => {
+    match (id, kill, kill_connections) {
+        (Some(id), true, false) => {
             terminate(&id)?;
             Ok(0)
         }
-        (None, true) => bail!(
+        (None, true, false) => bail!(
             "shell kill mode requires a session ID, e.g. `{} sh 42 --kill`",
             crate::cli::COMMAND_NAME,
         ),
-        (Some(id), false) => attach(&id, &args),
-        (None, false) => {
+        (Some(id), false, true) => {
+            kill_network_connections(&id)?;
+            Ok(0)
+        }
+        (None, false, true) => bail!(
+            "network connection kill mode requires a session ID, e.g. `{} sh 42 --kill-connections`",
+            crate::cli::COMMAND_NAME,
+        ),
+        (Some(id), false, false) => attach(&id, &args),
+        (None, false, false) => {
             list()?;
             Ok(0)
         }
+        (_, true, true) => unreachable!("clap rejects conflicting shell actions"),
     }
 }
 
@@ -102,6 +117,7 @@ pub(crate) struct Session {
     pub(crate) template: String,
     pub(crate) name: String,
     pub(crate) mount_target: Option<String>,
+    pub(crate) session_token: String,
 }
 
 /// Enumerate running harness-hat sessions via `docker ps`. Returns containers
@@ -152,6 +168,7 @@ fn parse_running_sessions(output: &str) -> Vec<Session> {
             name: name.trim().to_string(),
             mount_target: parse_docker_label(labels, LABEL_MOUNT_TARGET)
                 .filter(|target| !target.trim().is_empty()),
+            session_token: parse_docker_label(labels, LABEL_SESSION).unwrap_or_default(),
         });
     }
     sessions
@@ -242,6 +259,78 @@ fn terminate(id: &str) -> Result<()> {
     }
     println!("Stopped session {wanted} ({name}).");
     Ok(())
+}
+
+fn kill_network_connections(id: &str) -> Result<()> {
+    let wanted = normalize_id(id);
+    let session = session_for_id(id)?;
+    if session.session_token.is_empty() {
+        bail!(
+            "session {wanted} predates network disconnect support; start a new session and retry"
+        );
+    }
+    let env = read_container_environment(&session.name)?;
+    let token = env_value(&env, "HARNESS_HAT_TOKEN")
+        .context("session does not expose its manager authentication token")?;
+    let container_url = env_value(&env, "HARNESS_HAT_URL")
+        .context("session does not expose its manager control URL")?;
+    let control_url = host_control_url(container_url)?;
+
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("building network disconnect client")?
+        .post(format!("{control_url}/container/network/disconnect"))
+        .bearer_auth(token)
+        .header("x-harness-hat-session-token", &session.session_token)
+        .send()
+        .context("requesting network disconnect; is the manager running?")?;
+    let status = response.status();
+    let body = response.bytes().context("reading manager response")?;
+    if !status.is_success() {
+        if let Ok(error) = serde_json::from_slice::<crate::server::ErrorResponse>(&body) {
+            bail!("{}: {}", error.error, error.reason);
+        }
+        bail!(
+            "manager request failed ({status}): {}",
+            String::from_utf8_lossy(&body).trim()
+        );
+    }
+    let result: crate::server::NetworkDisconnectResponse =
+        serde_json::from_slice(&body).context("decoding manager response")?;
+    println!(
+        "Killed {} current network connection(s) for session {wanted}. Future connections remain policy-controlled.",
+        result.connections_killed
+    );
+    Ok(())
+}
+
+fn read_container_environment(container_name: &str) -> Result<Vec<String>> {
+    let mut command = Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
+        .args(["inspect", "-f", "{{json .Config.Env}}", container_name])
+        .output()
+        .context("reading session control metadata with docker inspect")?;
+    if !output.status.success() {
+        bail!(
+            "docker inspect failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("decoding session environment")
+}
+
+fn env_value<'a>(env: &'a [String], name: &str) -> Option<&'a str> {
+    env.iter()
+        .find_map(|entry| entry.strip_prefix(name)?.strip_prefix('='))
+}
+
+fn host_control_url(container_url: &str) -> Result<String> {
+    let mut url = url::Url::parse(container_url).context("parsing session manager URL")?;
+    url.set_host(Some("127.0.0.1"))
+        .map_err(|_| anyhow::anyhow!("session manager URL has an invalid host"))?;
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 fn session_for_id(id: &str) -> Result<Session> {
@@ -518,7 +607,8 @@ fn list() -> Result<()> {
         );
     }
     println!(
-        "\nAttach with: {} sh <ID>\nStop with: {} sh <ID> --kill",
+        "\nAttach with: {} sh <ID>\nCut network connections with: {} sh <ID> --kill-connections\nStop with: {} sh <ID> --kill",
+        crate::cli::COMMAND_NAME,
         crate::cli::COMMAND_NAME,
         crate::cli::COMMAND_NAME
     );
@@ -537,8 +627,8 @@ fn compare_ids(left: &str, right: &str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::{
-        Session, attached_container_uri, compare_ids, docker_exec_args, hex_encode, normalize_id,
-        parse_running_sessions, resolve_editor,
+        Session, attached_container_uri, compare_ids, docker_exec_args, env_value, hex_encode,
+        host_control_url, normalize_id, parse_running_sessions, resolve_editor,
     };
     use crate::cli::OpenEditor;
     use std::ffi::OsString;
@@ -557,6 +647,7 @@ mod tests {
             template: "rust".to_string(),
             name: "hh-session".to_string(),
             mount_target: Some("/workspace".to_string()),
+            session_token: "session-token".to_string(),
         };
         assert_eq!(
             attached_container_uri(&session),
@@ -573,6 +664,7 @@ mod tests {
             template: "rust".to_string(),
             name: "hh-session".to_string(),
             mount_target: None,
+            session_token: "session-token".to_string(),
         };
         assert_eq!(
             attached_container_uri(&session),
@@ -613,7 +705,7 @@ mod tests {
     #[test]
     fn running_session_parser_includes_docker_container_id() {
         let sessions = parse_running_sessions(
-            "a1b2c3d4e5f6\thh-session\tharness-hat.alias=0042,harness-hat.workspace=api,harness-hat.template=rust\n",
+            "a1b2c3d4e5f6\thh-session\tharness-hat.alias=0042,harness-hat.workspace=api,harness-hat.template=rust,harness-hat.session=secret\n",
         );
 
         assert_eq!(sessions.len(), 1);
@@ -621,6 +713,21 @@ mod tests {
         assert_eq!(sessions[0].container_id, "a1b2c3d4e5f6");
         assert_eq!(sessions[0].workspace, "api");
         assert_eq!(sessions[0].template, "rust");
+        assert_eq!(sessions[0].session_token, "secret");
+    }
+
+    #[test]
+    fn session_control_metadata_helpers_parse_and_retarget_values() {
+        let env = vec![
+            "OTHER=value".to_string(),
+            "HARNESS_HAT_TOKEN=secret".to_string(),
+        ];
+        assert_eq!(env_value(&env, "HARNESS_HAT_TOKEN"), Some("secret"));
+        assert_eq!(env_value(&env, "MISSING"), None);
+        assert_eq!(
+            host_control_url("http://host.docker.internal:7878/").unwrap(),
+            "http://127.0.0.1:7878"
+        );
     }
 
     #[test]

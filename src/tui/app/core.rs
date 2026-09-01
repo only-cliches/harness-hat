@@ -1259,6 +1259,26 @@ impl App {
         }
     }
 
+    pub(crate) fn kill_network_connections_for_session(&mut self, idx: usize) {
+        let Some(session) = self.sessions.get(idx) else {
+            return;
+        };
+        let token = session.session_token.clone();
+        let label = session.tab_label();
+        match self.proxy_state.kill_current_connections(&token) {
+            Some(count) => self.push_log(
+                format!(
+                    "killed {count} current network connection(s) for '{label}'; future connections remain policy-controlled"
+                ),
+                false,
+            ),
+            None => self.push_log(
+                format!("no active network listener found for '{label}'"),
+                true,
+            ),
+        }
+    }
+
     pub(crate) fn handle_stop_request(
         &mut self,
         project: &str,

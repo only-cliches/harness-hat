@@ -1,18 +1,19 @@
 //! `hat rebuild` — rebuild the base image and configured Dockerfile templates.
 
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BASE_IMAGE: &str = "harness-hat-base:local";
 const BASE_DOCKERFILE: &str = "harness-hat-base.dockerfile";
 
-/// Rebuild the base image, followed by selected templates (or every template
-/// found in the configured Docker directory when `requested_templates` is
-/// empty). Template builds run in parallel after the base image succeeds.
+/// Rebuild the base image, followed by selected templates (or templates whose
+/// images already exist locally when `requested_templates` is empty). Pass
+/// `all` to rebuild every template found in the configured Docker directory.
 pub fn run(
     requested_templates: Vec<String>,
+    all: bool,
     no_cache: bool,
     explicit_config: Option<PathBuf>,
 ) -> Result<()> {
@@ -25,7 +26,12 @@ pub fn run(
     crate::init::ensure_docker_assets(&config.docker_dir)?;
 
     let templates = discover_templates(&config.docker_dir)?;
-    let selected = select_templates(&templates, &requested_templates)?;
+    let built = if requested_templates.is_empty() && !all {
+        locally_built_templates(&templates)?
+    } else {
+        BTreeSet::new()
+    };
+    let selected = select_templates(&templates, &requested_templates, all, &built)?;
 
     let base_dockerfile = config.docker_dir.join(BASE_DOCKERFILE);
     if !base_dockerfile.is_file() {
@@ -36,10 +42,14 @@ pub fn run(
     run_docker_build(&base_dockerfile, &config.docker_dir, BASE_IMAGE, no_cache)?;
 
     if selected.is_empty() {
-        println!(
-            "==> No template Dockerfiles found in {}",
-            config.docker_dir.display()
-        );
+        if requested_templates.is_empty() && !all {
+            println!("==> No previously built template images found");
+        } else {
+            println!(
+                "==> No template Dockerfiles found in {}",
+                config.docker_dir.display()
+            );
+        }
         return Ok(());
     }
 
@@ -101,9 +111,19 @@ fn discover_templates(docker_dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
 fn select_templates(
     available: &BTreeMap<String, PathBuf>,
     requested: &[String],
+    all: bool,
+    built: &BTreeSet<String>,
 ) -> Result<Vec<String>> {
-    if requested.is_empty() {
+    if all {
         return Ok(available.keys().cloned().collect());
+    }
+
+    if requested.is_empty() {
+        return Ok(available
+            .keys()
+            .filter(|name| built.contains(*name))
+            .cloned()
+            .collect());
     }
 
     let mut selected = Vec::new();
@@ -117,6 +137,29 @@ fn select_templates(
         }
     }
     Ok(selected)
+}
+
+fn locally_built_templates(available: &BTreeMap<String, PathBuf>) -> Result<BTreeSet<String>> {
+    let mut built = BTreeSet::new();
+    for stem in available.keys() {
+        let image = crate::config::image_tag_for_stem(stem);
+        if docker_image_exists(&image)? {
+            built.insert(stem.clone());
+        }
+    }
+    Ok(built)
+}
+
+fn docker_image_exists(image: &str) -> Result<bool> {
+    let mut command = Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let status = command
+        .args(["image", "inspect", image])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("checking whether docker image {image} exists"))?;
+    Ok(status.success())
 }
 
 fn run_docker_build(dockerfile: &Path, context: &Path, image: &str, no_cache: bool) -> Result<()> {
@@ -144,7 +187,7 @@ fn run_docker_build(dockerfile: &Path, context: &Path, image: &str, no_cache: bo
 #[cfg(test)]
 mod tests {
     use super::{discover_templates, select_templates};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     #[test]
@@ -172,15 +215,42 @@ mod tests {
         let selected = select_templates(
             &available,
             &["rust".to_string(), "go".to_string(), "rust".to_string()],
+            false,
+            &BTreeSet::new(),
         )
         .expect("select templates");
         assert_eq!(selected, vec!["rust", "go"]);
     }
 
     #[test]
+    fn select_templates_defaults_to_locally_built_templates() {
+        let available = BTreeMap::from([
+            ("go".to_string(), PathBuf::from("go.dockerfile")),
+            ("rust".to_string(), PathBuf::from("rust.dockerfile")),
+        ]);
+        let built = BTreeSet::from(["rust".to_string()]);
+
+        let selected =
+            select_templates(&available, &[], false, &built).expect("select built templates");
+        assert_eq!(selected, vec!["rust"]);
+    }
+
+    #[test]
+    fn select_templates_all_includes_unbuilt_templates() {
+        let available = BTreeMap::from([
+            ("go".to_string(), PathBuf::from("go.dockerfile")),
+            ("rust".to_string(), PathBuf::from("rust.dockerfile")),
+        ]);
+
+        let selected = select_templates(&available, &[], true, &BTreeSet::new())
+            .expect("select all templates");
+        assert_eq!(selected, vec!["go", "rust"]);
+    }
+
+    #[test]
     fn select_templates_rejects_unknown_name() {
         let available = BTreeMap::from([("go".to_string(), PathBuf::from("go.dockerfile"))]);
-        let error = select_templates(&available, &["python".to_string()])
+        let error = select_templates(&available, &["python".to_string()], false, &BTreeSet::new())
             .expect_err("unknown template must fail");
         assert!(error.to_string().contains("unknown template 'python'"));
     }

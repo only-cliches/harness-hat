@@ -108,22 +108,17 @@ RUN set -eu; \
     rm -rf /tmp/sg.zip /tmp/sg-extract; \
     sg --version
 
-# oh-my-pi (omp): coding agent CLI. Pinned release binary verified against
-# sha256 from the release's SHA256SUMS.txt.
-ARG OMP_VERSION=17.2.15
-ARG OMP_SHA256_AMD64=fa884941f932f4f5d2046acba971790ae6aae18fd4806472b01f041de670368a
-ARG OMP_SHA256_ARM64=36507ba3d98332f52649d22009ead86f154ab007cb169d68690fa2b0111769ad
+# oh-my-pi (omp): coding agent CLI. Follow the latest published release.
 ARG TARGETARCH
 RUN set -eu; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-        amd64|x86_64)  omp_arch="x64";   omp_sha="${OMP_SHA256_AMD64}" ;; \
-        arm64|aarch64) omp_arch="arm64"; omp_sha="${OMP_SHA256_ARM64}" ;; \
+        amd64|x86_64)  omp_arch="x64" ;; \
+        arm64|aarch64) omp_arch="arm64" ;; \
         *) echo "unsupported oh-my-pi architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/omp \
-        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${omp_arch}"; \
-    echo "${omp_sha}  /tmp/omp" | sha256sum -c -; \
+        "https://github.com/can1357/oh-my-pi/releases/latest/download/omp-linux-${omp_arch}"; \
     install -m 0755 /tmp/omp /usr/local/bin/omp; \
     rm -f /tmp/omp; \
     omp --version
@@ -532,28 +527,22 @@ SCRIPT
 RUN sed -i 's/\r$//' /usr/local/bin/harness-hat-init.sh \
     && chmod 755 /usr/local/bin/harness-hat-init.sh
 
-# npm registry packages are integrity-checked by npm against the registry
-# metadata; pinning the versions (H5) makes the build reproducible and stops a
-# newly-published malicious release from entering the image silently. Bump by
-# editing the ARGs and rebuilding.
-ARG CODEX_CLI_VERSION=0.144.0
-ARG PI_CODING_AGENT_VERSION=0.80.5
+# Install the latest published agent packages.
 RUN npm install -g \
-    "@openai/codex@${CODEX_CLI_VERSION}" \
-    "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}"
+    @openai/codex \
+    @earendil-works/pi-coding-agent \
+    opencode-ai
 
 ARG TARGETARCH
-ARG ANTIGRAVITY_CLI_VERSION=1.0.6
 RUN set -eu; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64|x86_64) agy_arch="x64"; agy_sha="3eae552781d3054b782142e3cfe7be73e3bd068c736a432ca6f1adaa40f19e07" ;; \
-      arm64|aarch64) agy_arch="arm64"; agy_sha="be6303d4b891a79457ca6ed169aff2efd3ceb694354634e85ef58c883bae6739" ;; \
+      amd64|x86_64) agy_arch="x64" ;; \
+      arm64|aarch64) agy_arch="arm64" ;; \
       *) echo "unsupported Antigravity CLI architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
       -o /tmp/agy_cli_linux.tar.gz \
-      "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_CLI_VERSION}/agy_cli_linux_${agy_arch}.tar.gz"; \
-    echo "${agy_sha}  /tmp/agy_cli_linux.tar.gz" | sha256sum -c -; \
+      "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_${agy_arch}.tar.gz"; \
     tar -xzf /tmp/agy_cli_linux.tar.gz -C /usr/local/bin antigravity; \
     ln -sf /usr/local/bin/antigravity /usr/local/bin/agy; \
     chmod 755 /usr/local/bin/antigravity; \
@@ -585,7 +574,11 @@ ENV DISABLE_AUTOUPDATER=1
 
 # Coder-compatible user at uid/gid 1000.
 USER coder
-RUN mkdir -p /home/coder/.local/bin /home/coder/.codex \
+# Pre-create bind-mount parent directories as coder. Docker otherwise creates
+# a missing parent (for example ~/.local/share for the keyring mount) as root,
+# preventing user-installed CLIs such as OpenCode from creating sibling state
+# directories there at runtime.
+RUN mkdir -p /home/coder/.local/bin /home/coder/.local/share /home/coder/.codex \
     && printf '#!/bin/sh\nexec claude --dangerously-skip-permissions "$@"\n' \
        > /home/coder/.local/bin/claude-yolo \
     && printf '#!/bin/sh\nexec codex --yolo "$@"\n' \

@@ -11,6 +11,7 @@ use lru::LruCache;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -45,6 +46,7 @@ pub struct PendingNetworkItem {
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     pub source_workspace: Option<String>,
     pub source_container: Option<String>,
+    pub source_session_token: Option<String>,
     pub source_status: String,
     pub has_proxy_authorization: bool,
     pub method: String,
@@ -149,6 +151,65 @@ pub struct ProxyState {
     /// M1: bounded LRU of per-host reqwest clients, avoids rebuilding the TLS
     /// context + connection pool on every forwarded request.
     http_client_cache: Arc<Mutex<LruCache<String, reqwest::Client>>>,
+    connection_trackers: Arc<Mutex<HashMap<String, std::sync::Weak<ConnectionTracker>>>>,
+    connection_tracker: Option<Arc<ConnectionTracker>>,
+    connection_cancel_flag: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Default)]
+struct ConnectionTracker {
+    next_id: AtomicU64,
+    connections: Mutex<HashMap<u64, std::sync::Weak<AtomicBool>>>,
+}
+
+struct TrackedConnection {
+    id: u64,
+    cancel_flag: Arc<AtomicBool>,
+    tracker: Arc<ConnectionTracker>,
+}
+
+impl ConnectionTracker {
+    fn track(self: &Arc<Self>) -> TrackedConnection {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.connections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id, Arc::downgrade(&cancel_flag));
+        TrackedConnection {
+            id,
+            cancel_flag,
+            tracker: Arc::clone(self),
+        }
+    }
+
+    fn kill_current(&self) -> usize {
+        let mut connections = self
+            .connections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut killed = 0;
+        connections.retain(|_, weak| {
+            let Some(flag) = weak.upgrade() else {
+                return false;
+            };
+            if !flag.swap(true, Ordering::SeqCst) {
+                killed += 1;
+            }
+            true
+        });
+        killed
+    }
+}
+
+impl Drop for TrackedConnection {
+    fn drop(&mut self) {
+        self.tracker
+            .connections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
 }
 
 pub(crate) struct ProxyConnectionPermit {
@@ -185,6 +246,9 @@ impl ProxyState {
                 NonZeroUsize::new(REQWEST_CLIENT_CACHE_CAPACITY)
                     .expect("non-zero client cache cap"),
             ))),
+            connection_trackers: Arc::new(Mutex::new(HashMap::new())),
+            connection_tracker: None,
+            connection_cancel_flag: None,
         })
     }
 
@@ -307,6 +371,10 @@ impl ProxyState {
             .is_some_and(|fixed| fixed.priority == SourcePriority::Limited)
     }
 
+    fn connection_tracker(&self) -> Option<Arc<ConnectionTracker>> {
+        self.connection_tracker.clone()
+    }
+
     pub(crate) fn has_configured_localhost_forward(&self, host: &str, port: u16) -> bool {
         self.localhost_forward_host_port(host, port).is_some()
     }
@@ -362,7 +430,13 @@ impl ProxyState {
         port: u16,
         addrs: &[std::net::SocketAddr],
     ) -> Result<reqwest::Client> {
-        let cache_key = format!("{host}:{port}");
+        let cache_key = format!(
+            "{}\0{host}:{port}",
+            self.fixed_source
+                .as_ref()
+                .map(|source| source.auth_token.as_str())
+                .unwrap_or("<root>")
+        );
         if let Ok(mut cache) = self.http_client_cache.lock()
             && let Some(client) = cache.get(&cache_key)
         {
@@ -391,6 +465,38 @@ impl ProxyState {
             limiters.clear();
         }
         crate::proxy::clear_dns_cache();
+    }
+
+    /// Cancel every proxy connection that was already open for one session.
+    /// The listener remains active, so later connections still pass through
+    /// the normal policy checks.
+    pub fn kill_current_connections(&self, session_token: &str) -> Option<usize> {
+        let tracker = {
+            let mut trackers = self
+                .connection_trackers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let tracker = trackers.get(session_token).and_then(|weak| weak.upgrade());
+            if tracker.is_none() {
+                trackers.remove(session_token);
+            }
+            tracker
+        }?;
+        let killed = tracker.kill_current();
+
+        // Dropping this session's cached clients closes idle upstream HTTP
+        // keep-alive sockets that are not represented by an active task.
+        if let Ok(mut cache) = self.http_client_cache.lock() {
+            let prefix = format!("{session_token}\0");
+            let keys = cache
+                .iter()
+                .filter_map(|(key, _)| key.starts_with(&prefix).then_some(key.clone()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                cache.pop(&key);
+            }
+        }
+        Some(killed)
     }
 }
 
@@ -427,7 +533,10 @@ impl ProxyState {
         body: &[u8],
         state: ActivityState,
     ) -> Activity {
-        let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_flag = self
+            .connection_cancel_flag
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let (payload_preview, payload_truncated) = payload_preview(body);
         let content_type = headers
             .iter()
@@ -502,6 +611,8 @@ pub struct ScopedProxyListener {
     pub addr: String,
     proxy_auth_token: String,
     abort_handle: tokio::task::AbortHandle,
+    session_token: String,
+    root_state: ProxyState,
 }
 
 impl ScopedProxyListener {
@@ -517,6 +628,11 @@ impl ScopedProxyListener {
 impl Drop for ScopedProxyListener {
     fn drop(&mut self) {
         self.abort_handle.abort();
+        self.root_state
+            .connection_trackers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.session_token);
     }
 }
 
@@ -539,9 +655,21 @@ async fn run_scoped_listener(state: ProxyState, listener: TcpListener) -> Result
                     continue;
                 };
                 let state = state.clone();
+                let tracked = state
+                    .connection_tracker()
+                    .expect("scoped listeners always have a connection tracker")
+                    .track();
+                let cancel_flag = Arc::clone(&tracked.cancel_flag);
+                let mut connection_state = state.clone();
+                connection_state.connection_cancel_flag = Some(Arc::clone(&cancel_flag));
                 tasks.spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = handle_connection(stream, state).await {
+                    let _tracked = tracked;
+                    let result = tokio::select! {
+                        result = handle_connection(stream, connection_state) => result,
+                        _ = crate::activity::wait_cancelled(cancel_flag) => Ok(()),
+                    };
+                    if let Err(e) = result {
                         if is_expected_disconnect(&e) {
                             debug!("proxy: {e}");
                         } else {
@@ -621,6 +749,14 @@ pub fn spawn_scoped_listener_with_forwards(
             localhost_forwards,
         )
     };
+    let tracker = Arc::new(ConnectionTracker::default());
+    state
+        .connection_trackers
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(auth_token.to_string(), Arc::downgrade(&tracker));
+    let mut fixed_state = fixed_state;
+    fixed_state.connection_tracker = Some(tracker);
     let task = tokio::spawn(async move {
         if let Err(e) = run_scoped_listener(fixed_state, listener).await {
             error!("scoped proxy server error: {e}");
@@ -630,6 +766,8 @@ pub fn spawn_scoped_listener_with_forwards(
         addr,
         proxy_auth_token: auth_token.to_string(),
         abort_handle: task.abort_handle(),
+        session_token: auth_token.to_string(),
+        root_state: state.clone(),
     })
 }
 
@@ -675,5 +813,35 @@ async fn handle_connection(stream: TcpStream, state: ProxyState) -> Result<()> {
         handle_connect(stream, state).await
     } else {
         handle_plain_http(stream, state).await
+    }
+}
+
+#[cfg(test)]
+mod connection_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn kill_current_only_marks_connections_open_at_call_time() {
+        let tracker = Arc::new(ConnectionTracker::default());
+        let first = tracker.track();
+        let second = tracker.track();
+
+        assert_eq!(tracker.kill_current(), 2);
+        assert!(first.cancel_flag.load(Ordering::SeqCst));
+        assert!(second.cancel_flag.load(Ordering::SeqCst));
+        assert_eq!(tracker.kill_current(), 0);
+
+        let later = tracker.track();
+        assert!(!later.cancel_flag.load(Ordering::SeqCst));
+        assert_eq!(tracker.kill_current(), 1);
+        assert!(later.cancel_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dropping_a_connection_removes_it_from_the_tracker() {
+        let tracker = Arc::new(ConnectionTracker::default());
+        let connection = tracker.track();
+        drop(connection);
+        assert_eq!(tracker.kill_current(), 0);
     }
 }
