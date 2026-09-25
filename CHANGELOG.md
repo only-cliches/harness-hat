@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.8 Future
+## 0.8.8 Sept 25, 2026
 
 ### Added
 

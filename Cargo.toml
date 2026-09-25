@@ -1,6 +1,6 @@
 [package]
 name = "harness-hat"
-version = "0.8.7"
+version = "0.8.8"
 edition = "2024"
 rust-version = "1.89"
 description = "Docker-backed development sessions with proxy-mediated network policy."
