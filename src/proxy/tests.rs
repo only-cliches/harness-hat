@@ -3,16 +3,19 @@ mod tests {
     use crate::proxy::connect::parse_sni_from_tls_client_hello;
     use crate::proxy::core::{NetworkDecision, ProxyState, SourceIdentityStatus, SourcePriority};
     use crate::proxy::helpers::{
-        canonicalize_host, decode_source_from_proxy_authorization,
-        ensure_host_header_matches_target, format_byte_count, host_matches_pattern,
-        proxy_authorization_matches_token, resolve_public_addrs, split_host_port,
+        canonicalize_host, copy_bidirectional_with_idle_timeout,
+        decode_source_from_proxy_authorization, ensure_host_header_matches_target,
+        format_byte_count, host_matches_pattern, proxy_authorization_matches_token,
+        resolve_public_addrs, split_host_port,
     };
-    use crate::proxy::http::{prompt_network, read_body_any};
+    use crate::proxy::http::{prompt_network, read_body_any, read_request_head_any};
     use crate::shared_config::SharedConfig;
     use base64::Engine as _;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
     fn test_temp_root() -> std::path::PathBuf {
@@ -270,14 +273,86 @@ global_rules_file = "/tmp/global.toml""#;
         let mut stream = tokio::io::empty();
         let headers = vec![("Content-Length".to_string(), "20000000".to_string())];
 
-        let err = read_body_any(&mut stream, &headers, Vec::new())
-            .await
-            .expect_err("oversized body should fail");
+        let err = read_body_any(
+            &mut stream,
+            &headers,
+            Vec::new(),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect_err("oversized body should fail");
 
         assert!(
             err.to_string().contains("request body too large"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn tunnel_closes_after_the_configured_idle_timeout() {
+        let (_client, mut downstream) = tokio::io::duplex(64);
+        let (_server, mut upstream) = tokio::io::duplex(64);
+
+        let err = copy_bidirectional_with_idle_timeout(
+            &mut downstream,
+            &mut upstream,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect_err("an inactive tunnel should time out");
+
+        assert!(err.to_string().contains("inactivity"));
+    }
+
+    #[tokio::test]
+    async fn proxy_request_reads_time_out_when_client_stalls() {
+        let (_client, mut stream) = tokio::io::duplex(64);
+        let err = read_request_head_any(&mut stream, Duration::from_millis(20))
+            .await
+            .expect_err("incomplete request head should time out");
+        assert!(err.to_string().contains("reading request head"));
+
+        let (_client, mut stream) = tokio::io::duplex(64);
+        let headers = vec![("Content-Length".to_string(), "4".to_string())];
+        let err = read_body_any(
+            &mut stream,
+            &headers,
+            b"ab".to_vec(),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("incomplete request body should time out");
+        assert!(err.to_string().contains("reading request body"));
+    }
+
+    #[tokio::test]
+    async fn tunnel_activity_extends_idle_deadline() {
+        let (mut client, mut downstream) = tokio::io::duplex(64);
+        let (mut server, mut upstream) = tokio::io::duplex(64);
+        let relay = tokio::spawn(async move {
+            copy_bidirectional_with_idle_timeout(
+                &mut downstream,
+                &mut upstream,
+                Duration::from_millis(500),
+            )
+            .await
+        });
+
+        for _ in 0..4 {
+            client.write_all(b"x").await.unwrap();
+            let mut byte = [0];
+            server.read_exact(&mut byte).await.unwrap();
+            assert_eq!(byte, *b"x");
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        assert!(
+            !relay.is_finished(),
+            "active tunnel closed before becoming idle"
+        );
+
+        drop(client);
+        drop(server);
+        assert_eq!(relay.await.unwrap().unwrap(), (4, 0));
     }
 
     #[tokio::test]

@@ -832,6 +832,10 @@ pub fn image_tag_for_stem(stem: &str) -> String {
 }
 
 fn validate(config: &Config) -> Result<()> {
+    anyhow::ensure!(
+        config.defaults.proxy.idle_timeout_secs > 0,
+        "defaults.proxy.idle_timeout_secs must be greater than zero"
+    );
     for (profile_name, profile) in &config.env_profiles {
         for (key, value) in &profile.vars {
             anyhow::ensure!(

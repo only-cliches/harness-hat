@@ -6,6 +6,7 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 use anyhow::Result;
+use std::net::IpAddr;
 /// Container session management.
 ///
 /// Each running container gets a `ContainerSession` that owns a PTY process
@@ -520,6 +521,72 @@ pub(crate) fn loopback_to_host_docker(input: &str) -> String {
     input.replacen(host, "host.docker.internal", 1)
 }
 
+/// Return the Docker bridge gateway when the local Docker engine exposes one.
+///
+/// Containers launched without an explicit network join Docker's `bridge`
+/// network. On native Linux, `host.docker.internal` resolves to that bridge
+/// gateway, rather than to the host loopback interface. A service bound only
+/// to `127.0.0.1` is therefore invisible to the container.
+#[cfg(target_os = "linux")]
+fn docker_bridge_gateway() -> Option<String> {
+    let mut command = std::process::Command::new("docker");
+    crate::process_util::hide_console_window(&mut command);
+    let output = command
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_docker_bridge_gateway(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse Docker's default-bridge gateway output, accepting IPv4 only: the
+/// container init configures its host alias and strict-network bypasses using
+/// IPv4 addresses.
+fn parse_docker_bridge_gateway(output: &str) -> Option<String> {
+    let address: IpAddr = output.trim().parse().ok()?;
+    match address {
+        IpAddr::V4(address) if !address.is_unspecified() && !address.is_loopback() => {
+            Some(address.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+        || host
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
+}
+
+/// Select the host address for a per-session proxy listener.
+///
+/// On native Linux, bind a loopback-configured proxy to the Docker bridge.
+/// The bridge is local to Docker and avoids widening the listener to a LAN
+/// interface; it lets `host.docker.internal` reach the scoped listener.
+/// If discovery fails (or on Docker Desktop), retain the configured bind host.
+pub(crate) fn container_reachable_proxy_host(configured_host: &str) -> String {
+    if !is_loopback_host(configured_host) {
+        return configured_host.to_string();
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(gateway) = docker_bridge_gateway() {
+        return gateway;
+    }
+
+    configured_host.to_string()
+}
+
 /// Convert an arbitrary project or container name into a Docker-safe name.
 #[instrument(level = "trace", skip(input))]
 pub fn sanitize_docker_name(input: &str) -> String {
@@ -638,6 +705,20 @@ mod tests {
             loopback_to_host_docker("http://api.example.com/?h=localhost"),
             "http://api.example.com/?h=localhost"
         );
+    }
+
+    #[test]
+    fn parses_only_routable_ipv4_docker_bridge_gateways() {
+        use super::parse_docker_bridge_gateway;
+
+        assert_eq!(
+            parse_docker_bridge_gateway("172.17.0.1\n").as_deref(),
+            Some("172.17.0.1")
+        );
+        assert_eq!(parse_docker_bridge_gateway("127.0.0.1"), None);
+        assert_eq!(parse_docker_bridge_gateway("0.0.0.0"), None);
+        assert_eq!(parse_docker_bridge_gateway("not-an-address"), None);
+        assert_eq!(parse_docker_bridge_gateway("fd00::1"), None);
     }
 
     #[test]

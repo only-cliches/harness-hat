@@ -424,11 +424,16 @@ impl App {
         let control_host = &cfg.defaults.control.server_host;
         let control_url = format!("http://{control_host}:{control_port}");
         let hostdo_script_host_path = cfg.docker_dir.join("scripts/hostdo.py");
-        let proxy_host = &cfg.defaults.proxy.proxy_host;
+        // A host-loopback bind is not visible through Docker's native Linux
+        // `host-gateway` alias. Select the bridge gateway for scoped session
+        // proxies when available, while preserving an explicitly configured
+        // non-loopback bind address.
+        let proxy_host =
+            crate::container::container_reachable_proxy_host(&cfg.defaults.proxy.proxy_host);
         let session_token = uuid::Uuid::new_v4().simple().to_string();
         let scoped_proxy = match crate::proxy::spawn_scoped_listener_with_forwards(
             &self.proxy_state,
-            proxy_host,
+            &proxy_host,
             &proj.name,
             &ctr.name,
             &session_token,

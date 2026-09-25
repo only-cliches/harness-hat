@@ -10,6 +10,8 @@ The global configuration controls the local manager, Docker templates, networkin
 
 The default also passes `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from the **host terminal** environment into new sessions, so the Claude authentication steps in the next page work without additional configuration.
 
+`[defaults.proxy]` also has `idle_timeout_secs`, which defaults to `30`. It closes a client socket or CONNECT tunnel when neither direction has transferred traffic for that period. Set a larger positive value for long-idle protocols.
+
 ## Project Policy
 
 Each workspace can have project policy for network access and `hostdo`. When you create a typed workspace in the TUI, Harness Hat creates an appropriate starter policy. When a network or host-command prompt is approved with a remembered decision, Harness Hat records the narrow rule for that project.

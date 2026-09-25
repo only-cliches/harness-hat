@@ -94,7 +94,8 @@ pub(crate) fn parse_sni_from_tls_client_hello(record: &[u8]) -> Option<String> {
 // ── HTTPS CONNECT tunnel ──────────────────────────────────────────────────────
 
 pub(crate) async fn handle_connect(mut stream: TcpStream, state: ProxyState) -> Result<()> {
-    let (head, connect_remainder) = read_request_head_any(&mut stream).await?;
+    let (head, connect_remainder) =
+        read_request_head_any(&mut stream, state.proxy_idle_timeout()).await?;
     let head_str = std::str::from_utf8(&head).unwrap_or("");
 
     let (raw_host, port) = parse_connect_target(head_str)

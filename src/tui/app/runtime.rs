@@ -216,6 +216,10 @@ impl App {
                         }
                         // Prefer the spawn error as the headline diagnostic.
                         let diagnostic_for_state = Some(error.clone());
+                        let stream_reason = build_failure_with_log_location(
+                            format!("docker build failed: {error}"),
+                            log_path.as_deref(),
+                        );
                         self.build_finished = Some(BuildFinished {
                             command,
                             cancelled: false,
@@ -228,7 +232,7 @@ impl App {
                         if let Some(pending) = self.workspace_launch_pending.take() {
                             crate::tui::app::launch::finish_launch_stream(
                                 &pending.event_tx,
-                                Err(format!("docker build failed: {error}")),
+                                Err(stream_reason),
                             );
                         }
                         continue;
@@ -300,6 +304,18 @@ impl App {
                             self.push_log(format!("  build detail: {diagnostic}"), true);
                         }
                         let diagnostic_for_stream = diagnostic.clone();
+                        let stream_reason = match (exit_code, diagnostic_for_stream) {
+                            (Some(code), Some(diag)) => {
+                                format!("docker build failed (exit code {code}): {diag}")
+                            }
+                            (Some(code), None) => {
+                                format!("docker build failed (exit code {code})")
+                            }
+                            (None, Some(diag)) => format!("docker build failed: {diag}"),
+                            (None, None) => "docker build failed".to_string(),
+                        };
+                        let stream_reason =
+                            build_failure_with_log_location(stream_reason, log_path.as_deref());
                         self.build_finished = Some(BuildFinished {
                             command,
                             cancelled: false,
@@ -310,19 +326,9 @@ impl App {
                         });
                         self.focus = Focus::ImageBuild;
                         if let Some(pending) = self.workspace_launch_pending.take() {
-                            let reason = match (exit_code, diagnostic_for_stream) {
-                                (Some(code), Some(diag)) => {
-                                    format!("docker build failed (exit code {code}): {diag}")
-                                }
-                                (Some(code), None) => {
-                                    format!("docker build failed (exit code {code})")
-                                }
-                                (None, Some(diag)) => format!("docker build failed: {diag}"),
-                                (None, None) => "docker build failed".to_string(),
-                            };
                             crate::tui::app::launch::finish_launch_stream(
                                 &pending.event_tx,
-                                Err(reason),
+                                Err(stream_reason),
                             );
                         }
                     }
@@ -693,6 +699,16 @@ fn pending_network_merge_key_matches(
         && left.port == right.port
 }
 
+/// The CLI receives a terminal `LaunchEvent::Error`, not the in-TUI build
+/// pane that already renders this path. Include the retained build log there
+/// so terminal users can inspect the complete command output.
+fn build_failure_with_log_location(reason: String, log_path: Option<&std::path::Path>) -> String {
+    match log_path {
+        Some(path) => format!("{reason}\nDocker build log: {}", path.display()),
+        None => reason,
+    }
+}
+
 /// Stable key used to count "how many pending approvals does this source
 /// already hold." Prefers an explicit `source_workspace`; falls back to the
 /// source container identity, then to a shared "unknown" bucket so requests
@@ -751,5 +767,17 @@ mod pending_network_merge_tests {
         let other_port = pending("one", "GET", "whatever.com", 8443, "/one");
         assert!(!pending_network_merge_key_matches(&first, &other_session));
         assert!(!pending_network_merge_key_matches(&first, &other_port));
+    }
+
+    #[test]
+    fn terminal_build_failures_include_the_retained_log_location() {
+        let reason = build_failure_with_log_location(
+            "docker build failed".to_string(),
+            Some(std::path::Path::new("/tmp/docker-build.log")),
+        );
+        assert_eq!(
+            reason,
+            "docker build failed\nDocker build log: /tmp/docker-build.log"
+        );
     }
 }

@@ -13,7 +13,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
@@ -75,7 +75,7 @@ where
     U: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::select! {
-        result = copy_bidirectional(downstream, upstream) => match result {
+        result = copy_bidirectional_with_idle_timeout(downstream, upstream, state.proxy_idle_timeout()) => match result {
             Ok((from_client, from_server)) => {
                 state.activity_line(
                     &activity.id,
@@ -94,7 +94,7 @@ where
             }
             Err(e) => {
                 state.activity_finished(&activity.id, ActivityState::Failed, Some(e.to_string()));
-                Err(e.into())
+                Err(e)
             }
         },
         _ = wait_cancelled(activity.cancel_flag.clone()) => {
@@ -106,6 +106,71 @@ where
             Ok(())
         }
     }
+}
+
+/// Relay a tunnel while enforcing an inactivity deadline in either direction.
+/// `copy_bidirectional` has no progress hook, so a plain timeout around it
+/// would cap total tunnel lifetime rather than idle time.
+pub(crate) async fn copy_bidirectional_with_idle_timeout<D, U>(
+    downstream: &mut D,
+    upstream: &mut U,
+    idle_timeout: Duration,
+) -> Result<(u64, u64)>
+where
+    D: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut downstream_read, mut downstream_write) = tokio::io::split(downstream);
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
+    let mut client_buffer = [0u8; 16 * 1024];
+    let mut server_buffer = [0u8; 16 * 1024];
+    let mut client_closed = false;
+    let mut server_closed = false;
+    let mut from_client = 0u64;
+    let mut from_server = 0u64;
+    let idle_deadline = tokio::time::Instant::now() + idle_timeout;
+    let idle_timer = tokio::time::sleep_until(idle_deadline);
+    tokio::pin!(idle_timer);
+
+    while !client_closed || !server_closed {
+        tokio::select! {
+            result = downstream_read.read(&mut client_buffer), if !client_closed => {
+                let count = result?;
+                if count == 0 {
+                    client_closed = true;
+                    tokio::time::timeout(idle_timeout, upstream_write.shutdown())
+                        .await
+                        .map_err(|_| anyhow::anyhow!("proxy tunnel timed out shutting down upstream"))??;
+                } else {
+                    tokio::time::timeout(idle_timeout, upstream_write.write_all(&client_buffer[..count]))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("proxy tunnel timed out writing upstream"))??;
+                    from_client += count as u64;
+                    idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            result = upstream_read.read(&mut server_buffer), if !server_closed => {
+                let count = result?;
+                if count == 0 {
+                    server_closed = true;
+                    tokio::time::timeout(idle_timeout, downstream_write.shutdown())
+                        .await
+                        .map_err(|_| anyhow::anyhow!("proxy tunnel timed out shutting down downstream"))??;
+                } else {
+                    tokio::time::timeout(idle_timeout, downstream_write.write_all(&server_buffer[..count]))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("proxy tunnel timed out writing downstream"))??;
+                    from_server += count as u64;
+                    idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            _ = &mut idle_timer => {
+                anyhow::bail!("proxy tunnel closed after {} seconds of inactivity", idle_timeout.as_secs());
+            }
+        }
+    }
+
+    Ok((from_client, from_server))
 }
 
 pub(crate) fn proxy_authorization_matches_token(

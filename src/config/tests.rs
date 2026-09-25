@@ -79,6 +79,34 @@ fn defaults_include_control_server() {
     assert_eq!(defaults.control.server_port, 7878);
     assert_eq!(defaults.control.server_host, "127.0.0.1");
     assert_eq!(defaults.control.token_env_var, "HARNESS_HAT_TOKEN");
+    assert_eq!(defaults.proxy.idle_timeout_secs, 30);
+}
+
+#[test]
+fn proxy_idle_timeout_is_configurable() {
+    let proxy: crate::config::ProxyDefaults = toml::from_str("idle_timeout_secs = 45").unwrap();
+    assert_eq!(proxy.idle_timeout_secs, 45);
+}
+
+#[test]
+fn zero_proxy_idle_timeout_is_rejected() {
+    let root = temp_workspace();
+    let config_path = root.path().join("harness-hat.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "docker_dir = {}\n[manager]\nglobal_rules_file = {}\n[defaults.proxy]\nidle_timeout_secs = 0\n",
+            toml::Value::String(root.path().display().to_string()),
+            toml::Value::String(root.path().join("rules.toml").display().to_string()),
+        ),
+    )
+    .unwrap();
+
+    let err = load(&config_path).expect_err("zero idle timeout must fail validation");
+    assert!(
+        err.to_string()
+            .contains("idle_timeout_secs must be greater than zero")
+    );
 }
 
 #[test]

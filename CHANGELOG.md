@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `[defaults.proxy].idle_timeout_secs` (default: 30 seconds) to close inactive proxy clients and CONNECT tunnels. Set a larger positive value for protocols that stay idle longer.
 - The default TypeScript image now includes Playwright-provisioned headless Chromium, `agent-browser`, and its Codex skill for browser automation without a second browser download.
 - Added OpenCode to the shared base image and mounted its `~/.config/opencode` settings, agents, commands, and plugins into sessions.
 - Added `hat rules status [--workspace NAME] [--json]` plus explicit per-file recovery commands: `hat rules trust --workspace NAME` and `hat rules trust --global`. Workspace Settings now expose the equivalent inspect and trust actions.
@@ -11,12 +12,16 @@
 
 ### Changed
 
+- Scoped proxy listeners now limit each session to 50 open connections, including primary sources and clients that have not sent a request yet.
+- Linux fallback approval dialogs now offer allow once, always allow, deny once, and always deny choices for network and host-command requests.
 - Updated the bundled Codex (0.149.1), Pi (0.84.2), OpenCode (1.18.21), Antigravity (1.1.19), and oh-my-pi (18.0.4) CLIs to their current pinned releases.
 - Changed `hat rebuild` so that, when no templates are named, it rebuilds only template images that already exist locally. Explicit template names still force those templates to rebuild, while `hat rebuild --all` rebuilds every configured template.
 - Folded repeated pending network requests for the same session, domain, and port into one approval prompt, even when their HTTP methods or paths differ. Requests from other sessions or to other ports remain separate.
 
 ### Fixed
 
+- Session proxies configured for host loopback now bind to the Docker bridge gateway on native Linux when available, making them reachable from containers through `host.docker.internal`.
+- CLI workspace launch failures now include the retained Docker build log path when one is available.
 - Container launch now rolls back any Docker container that starts but cannot be adopted into a TUI session, and removes its provisional session authorization. Failed launches no longer leave an unmanaged container with no scoped proxy/network access.
 - Explicit rules recovery clears a matching stale rules-change alert and synchronizes the rules watcher baseline, so a reviewed file trusted through the TUI or CLI is not immediately blocked again.
 

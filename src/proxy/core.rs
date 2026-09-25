@@ -13,6 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -31,9 +32,11 @@ use tracing::instrument;
 
 const REQWEST_CLIENT_CACHE_CAPACITY: usize = 256;
 
-const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const ROOT_PROXY_CONNECTION_LIMIT: usize = 256;
-const SCOPED_PROXY_CONNECTION_LIMIT: usize = 128;
+/// A scoped listener belongs to exactly one container session. Count every
+/// accepted socket, including clients which have not sent their request yet,
+/// so idle connections cannot bypass this per-session limit.
+const SCOPED_PROXY_CONNECTION_LIMIT: usize = 50;
 const SCOPED_PROXY_TOTAL_CONNECTION_LIMIT: usize = 192;
 const SCOPED_PROXY_LIMITED_CONNECTION_LIMIT: usize = 64;
 const ROOT_SOURCE_PROXY_CONNECTION_LIMIT: usize = 32;
@@ -291,11 +294,7 @@ impl ProxyState {
     }
 
     pub(crate) fn try_acquire_connection(&self) -> Option<ProxyConnectionPermit> {
-        let listener = if self.is_primary_source() {
-            None
-        } else {
-            Some(self.connection_limiter.clone().try_acquire_owned().ok()?)
-        };
+        let listener = Some(self.connection_limiter.clone().try_acquire_owned().ok()?);
         let scoped_limited = if self.is_limited_source() {
             Some(
                 self.scoped_limited_connection_limiter
@@ -373,6 +372,10 @@ impl ProxyState {
 
     fn connection_tracker(&self) -> Option<Arc<ConnectionTracker>> {
         self.connection_tracker.clone()
+    }
+
+    pub(crate) fn proxy_idle_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.get().defaults.proxy.idle_timeout_secs)
     }
 
     pub(crate) fn has_configured_localhost_forward(&self, host: &str, port: u16) -> bool {
@@ -781,7 +784,8 @@ async fn handle_connection(stream: TcpStream, state: ProxyState) -> Result<()> {
     // timeout elapses.
     let mut peek = [0u8; 8];
     let mut n = 0usize;
-    let deadline = tokio::time::Instant::now() + FIRST_BYTE_TIMEOUT;
+    let idle_timeout = state.proxy_idle_timeout();
+    let deadline = tokio::time::Instant::now() + idle_timeout;
     while n < 7 {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -819,6 +823,35 @@ async fn handle_connection(stream: TcpStream, state: ProxyState) -> Result<()> {
 #[cfg(test)]
 mod connection_tracker_tests {
     use super::*;
+
+    #[test]
+    fn scoped_session_connection_limit_is_fifty_for_primary_sources() {
+        let cfg: crate::config::Config = toml::from_str(
+            r#"
+docker_dir = "/tmp"
+[manager]
+global_rules_file = "/tmp/global.toml""#,
+        )
+        .unwrap();
+        let (pending_tx, _pending_rx) = tokio::sync::mpsc::channel(1);
+        let (activity_tx, _activity_rx) = tokio::sync::mpsc::channel(16);
+        let state =
+            ProxyState::new(SharedConfig::new(Arc::new(cfg)), pending_tx, activity_tx).unwrap();
+        let session =
+            state.with_fixed_source("workspace", "primary", "session", SourcePriority::Primary);
+
+        let permits = (0..SCOPED_PROXY_CONNECTION_LIMIT)
+            .map(|_| {
+                session
+                    .try_acquire_connection()
+                    .expect("connection should be admitted")
+            })
+            .collect::<Vec<_>>();
+        assert!(session.try_acquire_connection().is_none());
+
+        drop(permits);
+        assert!(session.try_acquire_connection().is_some());
+    }
 
     #[test]
     fn kill_current_only_marks_connections_open_at_call_time() {

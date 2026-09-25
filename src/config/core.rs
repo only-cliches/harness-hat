@@ -156,6 +156,10 @@ pub struct ProxyDefaults {
     pub legacy_proxy_port: u16,
     #[serde(default = "default_host")]
     pub proxy_host: String,
+    /// Close a proxy client or CONNECT tunnel after this many seconds with no
+    /// traffic. This is global because listeners are created per session.
+    #[serde(default = "default_proxy_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
     /// When enabled, containers are launched with NET_ADMIN + root so they can:
     ///   1) transparently redirect outbound HTTP/HTTPS through the harness-hat proxy
     ///   2) install strict outbound egress rules (iptables) to block direct egress
@@ -172,11 +176,16 @@ fn default_proxy_port() -> u16 {
     28781
 }
 
+fn default_proxy_idle_timeout_secs() -> u64 {
+    30
+}
+
 impl Default for ProxyDefaults {
     fn default() -> Self {
         Self {
             legacy_proxy_port: default_proxy_port(),
             proxy_host: default_host(),
+            idle_timeout_secs: default_proxy_idle_timeout_secs(),
             strict_network: false,
         }
     }

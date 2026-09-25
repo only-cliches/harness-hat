@@ -31,6 +31,8 @@ token_env_var = "HARNESS_HAT_TOKEN"
 # `allow_remote_control = true` and turn the proxy into a network-reachable
 # MITM relay.
 proxy_host = "127.0.0.1"
+# Close a client socket or CONNECT tunnel after 30 seconds without traffic.
+idle_timeout_secs = 30
 strict_network = true
 
 [logging]

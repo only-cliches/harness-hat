@@ -15,11 +15,11 @@ use crate::proxy::{NetworkDecision, PendingNetworkItem, ProxyState, SourceIdenti
 use crate::rules::NetworkPolicy;
 
 const REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
-
 // ── Plain HTTP ────────────────────────────────────────────────────────────────
 
 pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) -> Result<()> {
-    let (head, body_remainder) = read_request_head_any(&mut stream).await?;
+    let idle_timeout = state.proxy_idle_timeout();
+    let (head, body_remainder) = read_request_head_any(&mut stream, idle_timeout).await?;
     let head_str = match std::str::from_utf8(&head) {
         Ok(s) => s,
         Err(_) => {
@@ -80,7 +80,7 @@ pub(crate) async fn handle_plain_http(mut stream: TcpStream, state: ProxyState) 
     };
     let path = strip_scheme_and_host(&path);
 
-    let body = read_body_any(&mut stream, &headers, body_remainder).await?;
+    let body = read_body_any(&mut stream, &headers, body_remainder, idle_timeout).await?;
     let activity = state.start_network_activity(
         source_workspace.clone(),
         source_container.clone(),
@@ -476,14 +476,21 @@ pub(crate) fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
-pub(crate) async fn read_request_head_any<R>(stream: &mut R) -> Result<(Vec<u8>, Vec<u8>)>
+pub(crate) async fn read_request_head_any<R>(
+    stream: &mut R,
+    idle_timeout: Duration,
+) -> Result<(Vec<u8>, Vec<u8>)>
 where
     R: AsyncRead + Unpin,
 {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
-        let n = stream.read(&mut tmp).await?;
+        let n = tokio::time::timeout(idle_timeout, stream.read(&mut tmp))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("proxy connection timed out while reading request head")
+            })??;
         if n == 0 {
             break;
         }
@@ -518,6 +525,7 @@ pub(crate) async fn read_body_any<R>(
     stream: &mut R,
     headers: &[(String, String)],
     initial: Vec<u8>,
+    idle_timeout: Duration,
 ) -> Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -541,7 +549,16 @@ where
     body.extend_from_slice(&initial);
     if body.len() < content_length {
         let mut rest = vec![0u8; content_length - body.len()];
-        stream.read_exact(&mut rest).await?;
+        let mut offset = 0;
+        while offset < rest.len() {
+            let count = tokio::time::timeout(idle_timeout, stream.read(&mut rest[offset..]))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("proxy connection timed out while reading request body")
+                })??;
+            anyhow::ensure!(count > 0, "incomplete request body");
+            offset += count;
+        }
         body.extend_from_slice(&rest);
     }
     Ok(body)
