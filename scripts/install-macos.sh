@@ -116,6 +116,15 @@ ensure_docker() {
     privileged hdiutil detach "$mount_path" >/dev/null || true
     die 'Docker Desktop installer was not found in the downloaded disk image'
   fi
+  codesign --verify --deep --strict "$mount_path/Docker.app" \
+    || die 'Docker Desktop application signature verification failed'
+  spctl --assess --type execute "$mount_path/Docker.app" \
+    || die 'macOS rejected the Docker Desktop application signature'
+  local docker_team
+  docker_team=$(codesign -dv --verbose=4 "$mount_path/Docker.app" 2>&1 \
+    | awk -F= '$1 == "TeamIdentifier" { print $2 }')
+  [[ "$docker_team" == '9BNSXJN65R' ]] \
+    || die 'Docker Desktop is not signed by the expected Docker Inc. team'
   privileged "$mount_path/Docker.app/Contents/MacOS/install" --accept-license --user="$TARGET_USER"
   privileged hdiutil detach "$mount_path" >/dev/null
   run_as_target open -a Docker || true
@@ -151,6 +160,11 @@ install_harness_hat() {
   curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
     --output "$WORK_DIR/$archive" \
     "https://github.com/$REPOSITORY/releases/download/$release/$archive"
+  curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+    --output "$WORK_DIR/$archive.sha256" \
+    "https://github.com/$REPOSITORY/releases/download/$release/$archive.sha256"
+  (cd "$WORK_DIR" && shasum -a 256 -c "$archive.sha256") \
+    || die 'Harness Hat release checksum verification failed'
   mkdir -p "$extract_dir"
   tar -xzf "$WORK_DIR/$archive" -C "$extract_dir"
   [[ -f "$extract_dir/hat" && -f "$extract_dir/hat-daemon" ]] \

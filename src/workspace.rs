@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -122,9 +123,13 @@ pub fn run(
         )?;
         // Primary config values are explicit overrides. All remembered choices
         // belong to the workspace and are persisted in harness-rules.toml.
-        if matched.template.is_none() && rules.template.as_deref() != Some(&template) {
-            save_workspace_template(&rules_path, &template)?;
-        }
+        let expected_rules_sha256 =
+            if matched.template.is_none() && rules.template.as_deref() != Some(&template) {
+                let written = save_workspace_template(&rules_path, &template)?;
+                Some(hex::encode(Sha256::digest(written.as_bytes())))
+            } else {
+                None
+            };
         let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
             env_passthrough_for_template(&config, &template),
         );
@@ -137,6 +142,7 @@ pub fn run(
             force_rebuild,
             launch_cwd,
             terminal_env,
+            expected_rules_sha256.as_deref(),
         )?;
         status(
             launch_only,
@@ -195,7 +201,8 @@ pub fn run(
         template_override.as_deref(),
         launch_only,
     )?;
-    save_workspace_template(&workspace_rules_path(&pwd), &template)?;
+    let written = save_workspace_template(&workspace_rules_path(&pwd), &template)?;
+    let expected_rules_sha256 = hex::encode(Sha256::digest(written.as_bytes()));
     let terminal_env = crate::shell::shell_exec_env_pairs_with_passthrough(
         env_passthrough_for_template(&config, &template),
     );
@@ -207,6 +214,7 @@ pub fn run(
         force_rebuild,
         None,
         terminal_env,
+        Some(&expected_rules_sha256),
     )?;
     status(
         launch_only,
@@ -390,18 +398,24 @@ fn workspace_rules_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join("harness-rules.toml")
 }
 
-fn save_workspace_template(rules_path: &Path, template: &str) -> Result<()> {
+fn save_workspace_template(rules_path: &Path, template: &str) -> Result<String> {
     if !rules_path.exists() {
         let mut rules = crate::rules::ProjectRules::default();
         rules.template = Some(template.to_string());
-        return crate::rules::write_rules_file(rules_path, &rules);
+        let rendered = crate::rules::render_rules_file(&rules)?;
+        crate::rules::write_rules_file(rules_path, &rules)?;
+        return Ok(rendered);
     }
 
-    let raw = std::fs::read_to_string(rules_path)?;
+    let raw = String::from_utf8(
+        crate::shared_config::read_rules_file_bytes(rules_path)?
+            .ok_or_else(|| anyhow::anyhow!("rules file disappeared before template update"))?,
+    )?;
     let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
     doc["template"] = toml_edit::value(template);
-    crate::config::atomic_write_with_lock(rules_path, doc.to_string().as_bytes())?;
-    Ok(())
+    let rendered = doc.to_string();
+    crate::config::atomic_write_with_lock(rules_path, rendered.as_bytes())?;
+    Ok(rendered)
 }
 
 /// Dedupe a candidate workspace name against `config.workspaces` by appending
@@ -687,6 +701,7 @@ fn post_launch(
     force_rebuild: bool,
     cwd: Option<&str>,
     terminal_env: Vec<(String, String)>,
+    expected_rules_sha256: Option<&str>,
 ) -> Result<LaunchResponse> {
     // No total-request or body-read timeout: a long or temporarily quiet build
     // (cold image pull + multi-stage) can legitimately take many minutes, and
@@ -709,6 +724,9 @@ fn post_launch(
     }
     if let Some(cwd) = cwd {
         body["cwd"] = serde_json::Value::String(cwd.to_string());
+    }
+    if let Some(expected) = expected_rules_sha256 {
+        body["expected_rules_sha256"] = serde_json::Value::String(expected.to_string());
     }
     let resp = client
         .post(format!("{control_url}/workspace/launch"))

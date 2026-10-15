@@ -159,15 +159,7 @@ ensure_docker() {
     printf 'Docker is installed but not ready; leaving the existing installation unchanged.\n' >&2
     return
   fi
-  printf 'Installing Docker Engine from Docker\x27s official unattended installer...\n'
-  download "$WORK_DIR/get-docker.sh" 'https://get.docker.com'
-  privileged sh "$WORK_DIR/get-docker.sh"
-  privileged systemctl enable --now docker
-  if ! getent group docker >/dev/null; then
-    privileged groupadd docker
-  fi
-  privileged usermod -aG docker "$TARGET_USER"
-  printf 'Docker Engine is installed. Log out and back in before Docker group membership takes effect.\n' >&2
+  die 'Docker is required. Install Docker Engine from the signed packages in Docker\x27s official repository, then rerun this installer: https://docs.docker.com/engine/install/'
 }
 
 install_harness_hat() {
@@ -186,6 +178,9 @@ install_harness_hat() {
   extract_dir="$WORK_DIR/harness-hat"
   printf 'Installing Harness Hat %s...\n' "$release"
   download "$WORK_DIR/$archive" "https://github.com/$REPOSITORY/releases/download/$release/$archive"
+  download "$WORK_DIR/$archive.sha256" "https://github.com/$REPOSITORY/releases/download/$release/$archive.sha256"
+  (cd "$WORK_DIR" && sha256sum -c "$archive.sha256") \
+    || die 'Harness Hat release checksum verification failed'
   mkdir -p "$extract_dir"
   tar -xzf "$WORK_DIR/$archive" -C "$extract_dir"
   [[ -f "$extract_dir/hat" && -f "$extract_dir/hat-daemon" ]] \

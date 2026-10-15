@@ -89,10 +89,10 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
             "config defaults.control.server_host {control_host:?} is not a valid IP address or 'localhost': {e}"
         )
     })?;
-    if !is_loopback_bind(&control_ip) && !allow_remote_control {
+    if !is_loopback_bind(&control_ip) {
         anyhow::bail!(
-            "refusing to bind control server to non-loopback address {control_host}; \
-             set defaults.control.allow_remote_control = true to opt in to remote control"
+            "refusing to bind the privileged control server to non-loopback address \
+             {control_host}; remote management is disabled because the HTTP API does not use TLS"
         );
     }
     let control_addr = format!("{control_host}:{control_port}");
@@ -106,7 +106,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
         restart_tx: restart_pending_tx,
         approval_tx,
         audit_tx,
-        token: token.clone(),
+        token,
         sessions: session_registry.clone(),
         exec_jobs: crate::server::ExecJobRegistry::default(),
         activity_tx: activity_tx.clone(),
@@ -119,9 +119,29 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
         .await
         .map_err(|e| anyhow::anyhow!("binding control server to {control_addr}: {e}"))?;
     info!("control server listening on {}", control_addr);
+    let management_state = server_state.clone();
     let control_handle = tokio::spawn(async move {
-        if let Err(e) = crate::server::run_with_listener(server_state, control_listener).await {
+        if let Err(e) = crate::server::run_with_listener(management_state, control_listener).await {
             error!("control server error: {e}");
+        }
+    });
+
+    // Containers receive only a session capability and connect to a separate
+    // router with no privileged management endpoints. On native Linux, bind
+    // to the Docker bridge gateway; Docker Desktop can reach host loopback.
+    let session_control_host = crate::container::container_reachable_proxy_host("127.0.0.1");
+    let session_control_addr = format!("{session_control_host}:0");
+    let session_listener = tokio::net::TcpListener::bind(&session_control_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("binding session server to {session_control_addr}: {e}"))?;
+    let session_control_port = session_listener.local_addr()?.port();
+    let session_control_url = format!("http://{session_control_host}:{session_control_port}");
+    info!("session server listening on {}", session_control_url);
+    let session_handle = tokio::spawn(async move {
+        if let Err(e) =
+            crate::server::run_session_with_listener(server_state, session_listener).await
+        {
+            error!("session server error: {e}");
         }
     });
 
@@ -178,7 +198,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
             let app = crate::tui::App::new(
                 shared_config,
                 config_path_for_tui,
-                token,
+                session_control_url,
                 session_registry,
                 exec_pending_rx,
                 stop_pending_rx,
@@ -214,6 +234,7 @@ async fn run_inner(config_path: PathBuf, service_mode: bool, headless_mode: bool
         error!(%error, "Harness Hat TUI stopped");
     }
     control_handle.abort();
+    session_handle.abort();
     docker_monitor_handle.abort();
     telemetry_handle.shutdown()?;
     tui_result.map_err(|e| anyhow::anyhow!("TUI thread panicked: {e}"))??;

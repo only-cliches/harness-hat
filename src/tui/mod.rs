@@ -251,7 +251,7 @@ struct BackgroundUiChannels {
 pub struct App {
     pub config: SharedConfig,
     pub loaded_config_path: PathBuf,
-    pub token: String,
+    pub session_control_url: String,
     pub session_registry: SessionRegistry,
     proxy_state: ProxyState,
 

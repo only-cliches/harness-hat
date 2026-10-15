@@ -8,8 +8,7 @@ library — no third-party packages.
 
 Environment variables:
   HARNESS_HAT_URL      Base URL of the harness-hat manager (default: http://127.0.0.1:7878)
-  HARNESS_HAT_TOKEN    Bearer token shown by the harness-hat TUI           (required)
-  HARNESS_HAT_SESSION_TOKEN  Per-session token injected by harness-hat     (required)
+  HARNESS_HAT_SESSION_TOKEN  Per-session bearer token injected by harness-hat (required)
 
 Usage:
   hostdo output [--image <docker-image>] [--timeout <seconds>] [--reason <text>] <command> [args...]
@@ -1188,12 +1187,6 @@ def main() -> None:
 
     base_url = os.environ.get("HARNESS_HAT_URL", "http://127.0.0.1:7878").rstrip("/")
 
-    token = os.environ.get("HARNESS_HAT_TOKEN", "")
-    if not token:
-        print("hostdo: HARNESS_HAT_TOKEN is not set", file=sys.stderr)
-        print("  Set it to the token shown in the harness-hat TUI.", file=sys.stderr)
-        sys.exit(1)
-
     session_token = os.environ.get("HARNESS_HAT_SESSION_TOKEN", "")
     if not session_token:
         print("hostdo: HARNESS_HAT_SESSION_TOKEN is not set", file=sys.stderr)
@@ -1205,7 +1198,7 @@ def main() -> None:
 
     opener = _no_proxy_opener()
 
-    if _run_job_control(opener, base_url, token, session_token, argv):
+    if _run_job_control(opener, base_url, session_token, session_token, argv):
         return
     print(f"hostdo: unknown command: {argv[0]}", file=sys.stderr)
     _print_usage(sys.stderr)

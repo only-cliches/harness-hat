@@ -33,6 +33,8 @@ const CONTROL_HANDLER_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_CONCURRENCY_LIMIT: usize = 64;
 const TUI_EVENT_CAPACITY: usize = 512;
 const TUI_EVENT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
+const MAX_TUI_WIDTH: u16 = 512;
+const MAX_TUI_HEIGHT: u16 = 256;
 
 /// Bounded, ordered daemon events for an attached terminal client. A client
 /// starts from a snapshot, then long-polls this log; if it falls behind the
@@ -702,6 +704,10 @@ pub struct WorkspaceLaunchRequest {
     pub cwd: Option<String>,
     #[serde(default)]
     pub terminal_env: Vec<(String, String)>,
+    /// SHA-256 of a rules file just written by the authenticated host client.
+    /// The manager trusts the write only if the on-disk bytes still match.
+    #[serde(default)]
+    pub expected_rules_sha256: Option<String>,
 }
 
 /// Final-success payload included in a `LaunchEvent::Launched`.
@@ -742,6 +748,7 @@ pub struct WorkspaceLaunchItem {
     pub force_rebuild: bool,
     pub cwd: Option<PathBuf>,
     pub terminal_env: Vec<(String, String)>,
+    pub expected_rules_sha256: Option<String>,
     pub event_tx: mpsc::Sender<LaunchEvent>,
 }
 
@@ -775,9 +782,8 @@ pub(crate) fn hostdo_exec_semaphore() -> Arc<Semaphore> {
         .clone()
 }
 
-/// Runs the manager control server.
-///
-/// The server intentionally exposes only container lifecycle control.
+/// Runs the loopback-only manager control server. This router accepts the
+/// daemon-wide host token and must never be placed on a network-facing bind.
 #[instrument(skip(server_state, listener))]
 pub async fn run_with_listener(
     server_state: ServerState,
@@ -789,11 +795,6 @@ pub async fn run_with_listener(
     // so the timeout + concurrency limit are enforced inside `stop_handler`
     // via `tokio::time::timeout` and `control_concurrency_semaphore()`.
     let router = Router::new()
-        .route("/container/stop", post(stop_handler))
-        .route(
-            "/container/network/disconnect",
-            post(network_disconnect_handler),
-        )
         .route("/workspace/launch", post(workspace_launch_handler))
         .route("/daemon/restart", post(daemon_restart_handler))
         .route("/approvals", get(approvals_list_handler))
@@ -802,6 +803,27 @@ pub async fn run_with_listener(
         .route("/rules/trust", post(rules_trust_handler))
         .route("/tui/frame", post(tui_frame_handler))
         .route("/tui/events", get(tui_events_handler))
+        .route("/healthz", get(healthz_handler))
+        .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
+        .with_state(Arc::new(server_state));
+
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+/// Runs the container-reachable API. Every route on this listener requires a
+/// registered per-session capability; privileged manager routes are absent.
+#[instrument(skip(server_state, listener))]
+pub async fn run_session_with_listener(
+    server_state: ServerState,
+    listener: tokio::net::TcpListener,
+) -> Result<()> {
+    let router = Router::new()
+        .route("/container/stop", post(stop_handler))
+        .route(
+            "/container/network/disconnect",
+            post(network_disconnect_handler),
+        )
         .route("/exec", post(crate::server::core::exec_handler))
         .route(
             "/exec/jobs",
@@ -823,7 +845,6 @@ pub async fn run_with_listener(
             "/exec/jobs/{id}/input",
             post(crate::server::core::exec_job_send_handler),
         )
-        .route("/healthz", get(healthz_handler))
         .layer(DefaultBodyLimit::max(CONTROL_BODY_LIMIT_BYTES))
         .with_state(Arc::new(server_state));
 
@@ -1112,10 +1133,14 @@ async fn tui_frame_handler(
         return response;
     }
 
-    if request.width == 0 || request.height == 0 {
+    if request.width == 0
+        || request.height == 0
+        || request.width > MAX_TUI_WIDTH
+        || request.height > MAX_TUI_HEIGHT
+    {
         return (
             StatusCode::BAD_REQUEST,
-            "terminal dimensions must be non-zero",
+            "terminal dimensions must be within 1..=512 columns and 1..=256 rows",
         )
             .into_response();
     }
@@ -1347,6 +1372,7 @@ pub(super) async fn workspace_launch_handler(
         force_rebuild: req.force_rebuild,
         cwd: req.cwd.map(PathBuf::from),
         terminal_env: req.terminal_env,
+        expected_rules_sha256: req.expected_rules_sha256,
         event_tx,
     };
     if state.launch_tx.send(item).await.is_err() {
@@ -1482,30 +1508,6 @@ pub(super) fn require_session_context(
     state: &ServerState,
     headers: &HeaderMap,
 ) -> Result<(String, SessionIdentity), Response> {
-    let auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let expected = format!("Bearer {}", state.token);
-    // Constant-time comparison so the 64-hex-char token can't be recovered
-    // byte-by-byte over a timing channel. We bail on length mismatch first —
-    // the token is fixed-length, so that branch doesn't leak useful info, and
-    // `ct_eq` requires equal-length inputs to make sense.
-    let auth_bytes = auth.as_bytes();
-    let expected_bytes = expected.as_bytes();
-    let auth_ok =
-        auth_bytes.len() == expected_bytes.len() && bool::from(auth_bytes.ct_eq(expected_bytes));
-    if !auth_ok {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "unauthorized".into(),
-                reason: "invalid or missing token".into(),
-            }),
-        )
-            .into_response());
-    }
-
     let session_token = headers
         .get("x-harness-hat-session-token")
         .and_then(|v| v.to_str().ok())
@@ -1517,6 +1519,29 @@ pub(super) fn require_session_context(
             Json(ErrorResponse {
                 error: "unauthorized".into(),
                 reason: "missing session token".into(),
+            }),
+        )
+            .into_response());
+    }
+
+    // A session endpoint is authorized only by the session's own capability.
+    // The daemon-wide host token is deliberately not accepted here and is
+    // never delivered to containers.
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let expected = format!("Bearer {session_token}");
+    let auth_bytes = auth.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    let auth_ok =
+        auth_bytes.len() == expected_bytes.len() && bool::from(auth_bytes.ct_eq(expected_bytes));
+    if !auth_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".into(),
+                reason: "invalid or missing session bearer token".into(),
             }),
         )
             .into_response());
@@ -1654,7 +1679,7 @@ mod tests {
         let headers = HeaderMap::from_iter([
             (
                 axum::http::header::AUTHORIZATION,
-                HeaderValue::from_static("Bearer token"),
+                HeaderValue::from_static("Bearer session"),
             ),
             (
                 axum::http::header::HeaderName::from_static("x-harness-hat-session-token"),
@@ -1710,7 +1735,7 @@ mod tests {
         let state = test_server_state(registry, ExecJobRegistry::default());
 
         let mut headers = HeaderMap::new();
-        headers.insert("authorization", HeaderValue::from_static("Bearer token"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer session"));
         headers.insert(
             "x-harness-hat-session-token",
             HeaderValue::from_static("session"),
@@ -1719,6 +1744,27 @@ mod tests {
             require_session_context(&state, &headers).expect("session context");
         assert_eq!(session_token, "session");
         assert_eq!(identity.workspace_name, "workspace");
+    }
+
+    #[test]
+    fn require_session_context_rejects_daemon_token() {
+        let registry = SessionRegistry::default();
+        registry.insert(
+            "session".to_string(),
+            SessionIdentity {
+                workspace_name: "workspace".to_string(),
+                container_id: "container".to_string(),
+                mount_target: "/workspace".to_string(),
+            },
+        );
+        let state = test_server_state(registry, ExecJobRegistry::default());
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer token"));
+        headers.insert(
+            "x-harness-hat-session-token",
+            HeaderValue::from_static("session"),
+        );
+        assert!(require_session_context(&state, &headers).is_err());
     }
 
     #[tokio::test]
@@ -1740,6 +1786,30 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tui_frame_rejects_oversized_dimensions() {
+        let state = Arc::new(test_server_state(
+            SessionRegistry::default(),
+            ExecJobRegistry::default(),
+        ));
+        let response = tui_frame_handler(
+            State(state),
+            HeaderMap::from_iter([(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer token"),
+            )]),
+            Json(TuiFrameRequest {
+                width: MAX_TUI_WIDTH + 1,
+                height: 24,
+                input: None,
+                full_frame: false,
+                client_cwd: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1904,15 +1974,23 @@ mod tests {
             .expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
         let server = tokio::spawn(async move {
-            run_with_listener(state, listener)
+            run_session_with_listener(state, listener)
                 .await
-                .expect("control server")
+                .expect("session server")
         });
         let client = reqwest::Client::new();
 
+        let manager_route_response = client
+            .get(format!("http://{addr}/approvals"))
+            .bearer_auth("session")
+            .send()
+            .await
+            .expect("manager route request");
+        assert_eq!(manager_route_response.status(), StatusCode::NOT_FOUND);
+
         let status_response = client
             .get(format!("http://{addr}/exec/jobs/{job_id}"))
-            .bearer_auth("token")
+            .bearer_auth("session")
             .header("x-harness-hat-session-token", "session")
             .send()
             .await
@@ -1924,7 +2002,7 @@ mod tests {
 
         let cross_session_response = client
             .get(format!("http://{addr}/exec/jobs/{job_id}"))
-            .bearer_auth("token")
+            .bearer_auth("other-session")
             .header("x-harness-hat-session-token", "other-session")
             .send()
             .await
@@ -1933,7 +2011,7 @@ mod tests {
 
         let output_response = client
             .get(format!("http://{addr}/exec/jobs/{job_id}/output"))
-            .bearer_auth("token")
+            .bearer_auth("session")
             .header("x-harness-hat-session-token", "session")
             .send()
             .await

@@ -108,17 +108,21 @@ RUN set -eu; \
     rm -rf /tmp/sg.zip /tmp/sg-extract; \
     sg --version
 
-# oh-my-pi (omp): coding agent CLI. Follow the latest published release.
+# oh-my-pi (omp): coding agent CLI. Pin both release and per-architecture hash.
+ARG OMP_VERSION=v18.11.0
+ARG OMP_SHA256_AMD64=c23a58ad8a92f4e738aa12dc904f3b0a1ac7035b953b9bf5d39b71a226179f6f
+ARG OMP_SHA256_AARCH64=299e0b63c482d78f00f2bae75000815ad6890cb6192cbc9f66c8d98e9ce70b80
 ARG TARGETARCH
 RUN set -eu; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-        amd64|x86_64)  omp_arch="x64" ;; \
-        arm64|aarch64) omp_arch="arm64" ;; \
+        amd64|x86_64)  omp_arch="x64";   omp_sha="${OMP_SHA256_AMD64}" ;; \
+        arm64|aarch64) omp_arch="arm64"; omp_sha="${OMP_SHA256_AARCH64}" ;; \
         *) echo "unsupported oh-my-pi architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
         -o /tmp/omp \
-        "https://github.com/can1357/oh-my-pi/releases/latest/download/omp-linux-${omp_arch}"; \
+        "https://github.com/can1357/oh-my-pi/releases/download/${OMP_VERSION}/omp-linux-${omp_arch}"; \
+    echo "${omp_sha}  /tmp/omp" | sha256sum -c -; \
     install -m 0755 /tmp/omp /usr/local/bin/omp; \
     rm -f /tmp/omp; \
     omp --version
@@ -527,22 +531,26 @@ SCRIPT
 RUN sed -i 's/\r$//' /usr/local/bin/harness-hat-init.sh \
     && chmod 755 /usr/local/bin/harness-hat-init.sh
 
-# Install the latest published agent packages.
+# Install fixed package releases; npm verifies registry-provided integrity.
 RUN npm install -g \
-    @openai/codex \
-    @earendil-works/pi-coding-agent \
-    opencode-ai
+    @openai/codex@0.162.1 \
+    @earendil-works/pi-coding-agent@1.2.0 \
+    opencode-ai@1.19.0
 
+ARG ANTIGRAVITY_VERSION=1.3.5
+ARG ANTIGRAVITY_SHA256_AMD64=007a5a44dbaf1caea464c3d9848c63b2f69945b01a8bf8852c56c477a64374cf
+ARG ANTIGRAVITY_SHA256_AARCH64=065505ab4686ec7113b7ccd87fce87795a8fd4b7776f771da4d53940206e34cc
 ARG TARGETARCH
 RUN set -eu; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64|x86_64) agy_arch="x64" ;; \
-      arm64|aarch64) agy_arch="arm64" ;; \
+      amd64|x86_64) agy_arch="x64";   agy_sha="${ANTIGRAVITY_SHA256_AMD64}" ;; \
+      arm64|aarch64) agy_arch="arm64"; agy_sha="${ANTIGRAVITY_SHA256_AARCH64}" ;; \
       *) echo "unsupported Antigravity CLI architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
       -o /tmp/agy_cli_linux.tar.gz \
-      "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_${agy_arch}.tar.gz"; \
+      "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_VERSION}/agy_cli_linux_${agy_arch}.tar.gz"; \
+    echo "${agy_sha}  /tmp/agy_cli_linux.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/agy_cli_linux.tar.gz -C /usr/local/bin antigravity; \
     ln -sf /usr/local/bin/antigravity /usr/local/bin/agy; \
     chmod 755 /usr/local/bin/antigravity; \

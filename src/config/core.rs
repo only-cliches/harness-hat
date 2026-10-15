@@ -116,8 +116,8 @@ pub struct ControlDefaults {
     pub server_host: String,
     #[serde(default = "default_token_env")]
     pub token_env_var: String,
-    /// Opt-in to binding the control server / proxy to non-loopback addresses.
-    /// Required to expose the API over a network.
+    /// Opt-in to binding session proxy listeners to non-loopback addresses.
+    /// The privileged manager API is always restricted to loopback.
     #[serde(default)]
     pub allow_remote_control: bool,
 }
