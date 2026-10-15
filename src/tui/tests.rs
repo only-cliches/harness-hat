@@ -91,7 +91,7 @@ fn a_new_remote_build_failure_forces_a_complete_frame() {
 }
 
 #[test]
-fn rules_watch_ignores_template_changes_but_detects_policy_changes() {
+fn rules_watch_detects_template_and_policy_changes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("harness-rules.toml");
     std::fs::write(
@@ -106,7 +106,7 @@ fn rules_watch_ignores_template_changes_but_detects_policy_changes() {
         "version = 1\ntemplate = \"rust\"\n[network]\nallowlist = [\"domain=example.com\"]\n",
     )
     .expect("write template");
-    assert_eq!(original, App::watched_file_stamp(&path));
+    assert_ne!(original, App::watched_file_stamp(&path));
 
     std::fs::write(
         &path,

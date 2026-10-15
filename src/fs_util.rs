@@ -2,8 +2,66 @@
 use anyhow::Context;
 use anyhow::Result;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
+
+/// Read a small regular file without following a final symlink.
+///
+/// Policy and configuration files live in agent-writable workspaces. Opening
+/// them through this helper prevents a FIFO/device from blocking the manager,
+/// prevents symlink substitution on Unix, and bounds memory use before a read.
+pub(crate) fn read_regular_file_limited(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open the reparse point itself so a workspace-controlled symlink or
+        // junction cannot redirect policy reads outside the workspace.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("opening regular file {}", path.display()));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("statting open file {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{} is not a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= max_bytes,
+        "{} is too large ({} bytes; maximum is {} bytes)",
+        path.display(),
+        metadata.len(),
+        max_bytes
+    );
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "{} grew beyond the {} byte limit while being read",
+        path.display(),
+        max_bytes
+    );
+    Ok(Some(bytes))
+}
 
 /// Render a host path without leaking Windows' internal extended-length prefix
 /// into user-facing text. `Path::canonicalize` returns `\\?\C:\...` (or
@@ -82,7 +140,7 @@ pub(crate) fn is_valid_env_name(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_windows_extended_path, write_env_file_entry};
+    use super::{normalize_windows_extended_path, read_regular_file_limited, write_env_file_entry};
 
     #[test]
     fn windows_extended_paths_render_as_standard_paths() {
@@ -128,5 +186,41 @@ mod tests {
         write_env_file_entry(&mut out, "GOOD_NAME", "value").expect("write env entry");
 
         assert_eq!(String::from_utf8(out).unwrap(), "GOOD_NAME=value\n");
+    }
+
+    #[test]
+    fn limited_regular_file_read_rejects_oversized_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules.toml");
+        std::fs::write(&path, b"123456789").unwrap();
+
+        let error = read_regular_file_limited(&path, 8).unwrap_err();
+        assert!(error.to_string().contains("too large"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn limited_regular_file_read_rejects_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules.pipe");
+        let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) }, 0);
+
+        let error = read_regular_file_limited(&path, 1024).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn limited_regular_file_read_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.toml");
+        let link = dir.path().join("rules.toml");
+        std::fs::write(&target, b"version = 1\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(read_regular_file_limited(&link, 1024).is_err());
     }
 }

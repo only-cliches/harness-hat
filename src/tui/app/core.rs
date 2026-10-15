@@ -21,20 +21,9 @@ impl App {
     fn content_hash_for_path(path: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        match std::fs::read_to_string(path) {
-            Ok(raw) => {
-                // `template` is workspace launch state, not executable or
-                // network policy. Ignore only that top-level field so a
-                // remembered template does not trigger a fail-closed policy
-                // alert; all other content remains byte-sensitive.
-                match raw.parse::<toml_edit::DocumentMut>() {
-                    Ok(mut doc) => {
-                        doc.remove("template");
-                        doc.to_string().hash(&mut hasher);
-                    }
-                    Err(_) => raw.hash(&mut hasher),
-                }
-            }
+        match crate::shared_config::read_rules_file_bytes(path) {
+            Ok(Some(bytes)) => bytes.hash(&mut hasher),
+            Ok(None) => 0u8.hash(&mut hasher),
             Err(_) => 0u8.hash(&mut hasher),
         }
         hasher.finish()
@@ -112,7 +101,7 @@ impl App {
     pub fn new(
         config: SharedConfig,
         loaded_config_path: PathBuf,
-        token: String,
+        session_control_url: String,
         session_registry: SessionRegistry,
         exec_pending_rx: mpsc::Receiver<PendingItem>,
         stop_pending_rx: mpsc::Receiver<ContainerStopItem>,
@@ -183,7 +172,7 @@ impl App {
         Ok(Self {
             config,
             loaded_config_path,
-            token,
+            session_control_url,
             session_registry,
             proxy_state,
             workspaces,

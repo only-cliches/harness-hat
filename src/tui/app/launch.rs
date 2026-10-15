@@ -133,6 +133,7 @@ impl App {
             force_rebuild,
             cwd,
             terminal_env,
+            expected_rules_sha256,
             event_tx,
         } = item;
 
@@ -169,6 +170,22 @@ impl App {
                 )),
             );
         };
+        if let Some(expected) = expected_rules_sha256.as_deref() {
+            let rules_path = cfg.workspaces[workspace_idx]
+                .canonical_path
+                .join("harness-rules.toml");
+            if let Err(error) = self
+                .config
+                .trust_rules_file_if_sha256(&rules_path, expected)
+            {
+                return finish_launch_stream(
+                    &event_tx,
+                    Err(format!(
+                        "workspace rules changed after template selection and were not trusted: {error}"
+                    )),
+                );
+            }
+        }
         let templates = self.workspace_templates_for_workspace(workspace_idx);
         let Some(template_idx) = templates.iter().position(|c| c.name == template) else {
             return finish_launch_stream(
@@ -420,9 +437,7 @@ impl App {
         }
         self.log_workspace_rules_status(&proj);
 
-        let control_port = cfg.defaults.control.server_port;
-        let control_host = &cfg.defaults.control.server_host;
-        let control_url = format!("http://{control_host}:{control_port}");
+        let control_url = self.session_control_url.clone();
         let hostdo_script_host_path = cfg.docker_dir.join("scripts/hostdo.py");
         // A host-loopback bind is not visible through Docker's native Linux
         // `host-gateway` alias. Select the bridge gateway for scoped session
@@ -490,7 +505,6 @@ impl App {
             &proj.name,
             &mount_source_path,
             &session_token,
-            &self.token,
             &control_url,
             &proxy_url,
             Some(hostdo_script_host_path.as_path()),

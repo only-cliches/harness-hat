@@ -627,12 +627,14 @@ fn compose_hostdo_policies(lhs: NetworkPolicy, rhs: NetworkPolicy) -> NetworkPol
 /// Load a `harness-rules.toml` file.  Returns a default (empty) rule set if the
 /// file does not exist, rather than an error.
 pub fn load(path: &Path) -> Result<ProjectRules> {
-    if !path.exists() {
+    let Some(bytes) = crate::shared_config::read_rules_file_bytes(path)
+        .with_context(|| format!("reading harness-rules.toml: {}", path.display()))?
+    else {
         return Ok(ProjectRules::default());
-    }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading harness-rules.toml: {}", path.display()))?;
-    let mut parsed: ProjectRules = toml::from_str(&raw)
+    };
+    let raw = std::str::from_utf8(&bytes)
+        .with_context(|| format!("harness-rules.toml is not UTF-8: {}", path.display()))?;
+    let mut parsed: ProjectRules = toml::from_str(raw)
         .with_context(|| format!("parsing harness-rules.toml: {}", path.display()))?;
     validate_rules_version(parsed.version, path)?;
     validate_template(parsed.template.as_deref(), path)?;

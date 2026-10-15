@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Split privileged management routes from the container-reachable session API. Containers now receive only a per-session capability, and the daemon-wide bearer token is never injected into a container. The privileged listener is restricted to loopback.
+- Rules files are read once from bounded regular files without following symlinks. Trust decisions cover the exact bytes, including `template`, and host-written template changes are accepted only when their SHA-256 digest still matches.
+- Capped remote TUI dimensions, updated all Rust dependencies past current RustSec advisories, pinned GitHub Actions and bundled CLI downloads, and added release archive and platform installer verification.
+
 ## 0.8.8 Sept 25, 2026
 
 ### Added

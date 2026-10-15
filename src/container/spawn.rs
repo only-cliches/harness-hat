@@ -142,7 +142,6 @@ pub(crate) fn mirrored_workspace_mount_target(workspace_path: &Path) -> Option<s
     command_argv,
     workspace_path,
     session_token,
-    token,
     proxy_url,
     extra_env,
     scoped_proxy
@@ -153,7 +152,6 @@ pub fn spawn(
     project_name: &str,
     workspace_path: &Path,
     session_token: &str,
-    token: &str,
     control_url: &str,
     proxy_url: &str,
     hostdo_script_host_path: Option<&Path>,
@@ -329,7 +327,6 @@ pub fn spawn(
         }
     }
 
-    write_env_file_entry(&mut env_file, "HARNESS_HAT_TOKEN", token)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_SESSION_TOKEN", session_token)?;
     write_env_file_entry(&mut env_file, "HARNESS_HAT_WORKSPACE", project_name)?;
     // Compatibility for older in-container integrations.

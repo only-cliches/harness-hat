@@ -17,7 +17,7 @@
 # container instead of `/workspace`. Windows drive paths use a best-effort
 # container path such as `/C/Users/example/project`.
 #
-# Preferred session template (saved by `hat workspace` after the first choice):
+# Preferred session template (saved by `hat ws` after the first choice):
 # template = "rust"
 # A `template` value in the matching `[[workspaces]]` entry in
 # harness-hat.toml overrides this value.
@@ -157,4 +157,7 @@ allowlist = [
     "domain=code.claude.com",
     "domain=advisories.gitlab.com",
 ]
-denylist = ["domain=sdmntprsouthcentralus.oaiusercontent.com"]
+denylist = [
+    "domain=sdmntprsouthcentralus.oaiusercontent.com",
+    "domain=sdmntprcentralindia.oaiusercontent.com",
+]

@@ -6,8 +6,7 @@ Requests that the harness-hat manager stop the current container session.
 
 Environment variables:
   HARNESS_HAT_URL      Base URL of the harness-hat manager (default: http://127.0.0.1:7878)
-  HARNESS_HAT_TOKEN    Bearer token shown by the harness-hat TUI           (required)
-  HARNESS_HAT_SESSION_TOKEN  Per-session token injected by harness-hat     (required)
+  HARNESS_HAT_SESSION_TOKEN  Per-session bearer token injected by harness-hat (required)
 """
 
 import json
@@ -137,11 +136,6 @@ def _candidate_base_urls(base_url: str) -> list[str]:
 def main() -> None:
     base_url = os.environ.get("HARNESS_HAT_URL", "http://127.0.0.1:7878").rstrip("/")
 
-    token = os.environ.get("HARNESS_HAT_TOKEN", "")
-    if not token:
-        print("killme: HARNESS_HAT_TOKEN is not set", file=sys.stderr)
-        sys.exit(1)
-
     session_token = os.environ.get("HARNESS_HAT_SESSION_TOKEN", "")
     if not session_token:
         print("killme: HARNESS_HAT_SESSION_TOKEN is not set", file=sys.stderr)
@@ -157,7 +151,7 @@ def main() -> None:
             f"{candidate_base}/container/stop",
             data=body,
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {session_token}",
                 "Content-Type": "application/json",
                 "x-harness-hat-session-token": session_token,
             },

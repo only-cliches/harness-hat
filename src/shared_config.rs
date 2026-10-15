@@ -7,6 +7,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
+use subtle::ConstantTimeEq;
+
+pub(crate) const RULES_FILE_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Thread-safe hot-reloadable handle to the current config.
 ///
@@ -54,7 +57,7 @@ struct RulesGuard {
 impl SharedConfig {
     pub fn new(config: Arc<Config>) -> Self {
         let mut guard = RulesGuard::default();
-        guard.track_config(&config);
+        guard.track_config(&config, true);
         Self {
             inner: Arc::new(RwLock::new(config)),
             rules_guard: Arc::new(RwLock::new(guard)),
@@ -74,7 +77,7 @@ impl SharedConfig {
         self.rules_guard
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .track_config(&config);
+            .track_config(&config, false);
     }
 
     /// Reject policy decisions when a rules file changed outside the manager.
@@ -122,7 +125,8 @@ impl SharedConfig {
     /// Trust exactly the file contents currently on disk. Any later change
     /// invalidates this trust on the next policy decision.
     pub fn trust_rules_file(&self, path: &Path) -> Result<()> {
-        let current = rules_file_fingerprint(path)?;
+        let current =
+            rules_file_fingerprint_from_bytes(read_rules_file_bytes(path)?.as_deref(), path)?;
         self.set_trusted_rules_file(path, current);
         Ok(())
     }
@@ -186,16 +190,12 @@ impl SharedConfig {
     /// bytes the manager wrote. This prevents an intervening external change
     /// from being mistaken for a manager-owned update.
     pub fn trust_rules_file_if_contents(&self, path: &Path, expected: &str) -> Result<()> {
-        let current = std::fs::read_to_string(path)?;
-        if current != expected {
+        let current = read_rules_file_bytes(path)?;
+        if current.as_deref() != Some(expected.as_bytes()) {
             bail!("rules file contents differ from the manager-owned write");
         }
-        // Use the same canonical fingerprint as the enforcement path. In
-        // particular, `template` is intentionally excluded because it is
-        // launch metadata rather than policy. Storing a raw hash here made a
-        // manager-owned remembered-rule write look like an external change on
-        // the next proxy request whenever the file had a template selected.
-        self.set_trusted_rules_file(path, rules_file_fingerprint(path)?);
+        let fingerprint = rules_file_fingerprint_from_bytes(current.as_deref(), path)?;
+        self.set_trusted_rules_file(path, fingerprint);
         Ok(())
     }
 
@@ -207,7 +207,27 @@ impl SharedConfig {
         if current.as_deref() != expected {
             bail!("rules file changed while its review dialog was open");
         }
-        self.set_trusted_rules_file(path, rules_file_fingerprint(path)?);
+        let fingerprint = rules_file_fingerprint_from_bytes(current.as_deref(), path)?;
+        self.set_trusted_rules_file(path, fingerprint);
+        Ok(())
+    }
+
+    /// Trust a host-initiated write only when the current file exactly matches
+    /// the digest computed from the bytes the host client wrote.
+    pub fn trust_rules_file_if_sha256(&self, path: &Path, expected_hex: &str) -> Result<()> {
+        if expected_hex.len() != 64 || !expected_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("invalid expected rules SHA-256 digest");
+        }
+        let current = read_rules_file_bytes(path)?;
+        let Some(bytes) = current.as_deref() else {
+            bail!("rules file is missing after the host-owned write");
+        };
+        let actual = hex::encode(Sha256::digest(bytes));
+        if !bool::from(actual.as_bytes().ct_eq(expected_hex.as_bytes())) {
+            bail!("rules file changed after the host-owned write");
+        }
+        let fingerprint = rules_file_fingerprint_from_bytes(Some(bytes), path)?;
+        self.set_trusted_rules_file(path, fingerprint);
         Ok(())
     }
 
@@ -224,7 +244,7 @@ impl SharedConfig {
 }
 
 impl RulesGuard {
-    fn track_config(&mut self, config: &Config) {
+    fn track_config(&mut self, config: &Config, trust_new: bool) {
         for path in rules_paths_for_workspace(config, None).into_iter().chain(
             config
                 .workspaces
@@ -235,9 +255,13 @@ impl RulesGuard {
                 continue;
             }
             let entry = match rules_file_fingerprint(&path) {
-                Ok(fingerprint) => GuardedRulesFile {
+                Ok(fingerprint) if trust_new => GuardedRulesFile {
                     trusted: Some(fingerprint),
                     blocked: false,
+                },
+                Ok(_) => GuardedRulesFile {
+                    trusted: None,
+                    blocked: true,
                 },
                 Err(_) => GuardedRulesFile {
                     trusted: None,
@@ -274,34 +298,28 @@ fn rules_paths_for_workspace(config: &Config, workspace_name: Option<&str>) -> V
 }
 
 fn rules_file_fingerprint(path: &Path) -> Result<RulesFileFingerprint> {
-    match read_rules_file_bytes(path)? {
+    let bytes = read_rules_file_bytes(path)?;
+    rules_file_fingerprint_from_bytes(bytes.as_deref(), path)
+}
+
+fn rules_file_fingerprint_from_bytes(
+    bytes: Option<&[u8]>,
+    path: &Path,
+) -> Result<RulesFileFingerprint> {
+    match bytes {
         Some(bytes) => {
-            // The workspace template is launch metadata, not a policy decision.
-            // The workspace command persists the first selected template itself,
-            // so treating that write as a policy-file change would immediately
-            // block the launch that made it. Keep every other byte (including
-            // comments) in the fingerprint so policy edits still require
-            // explicit review.
-            let raw = std::str::from_utf8(&bytes)
+            let raw = std::str::from_utf8(bytes)
                 .with_context(|| format!("rules file '{}' is not valid UTF-8", path.display()))?;
-            let mut document = raw
-                .parse::<toml_edit::DocumentMut>()
+            raw.parse::<toml_edit::DocumentMut>()
                 .with_context(|| format!("parsing rules file '{}'", path.display()))?;
-            document.remove("template");
-            Ok(RulesFileFingerprint::Contents(
-                Sha256::digest(document.to_string().as_bytes()).into(),
-            ))
+            Ok(RulesFileFingerprint::Contents(Sha256::digest(bytes).into()))
         }
         None => Ok(RulesFileFingerprint::Missing),
     }
 }
 
-fn read_rules_file_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+pub(crate) fn read_rules_file_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    crate::fs_util::read_regular_file_limited(path, RULES_FILE_MAX_BYTES)
 }
 
 #[cfg(test)]
@@ -407,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_template_change_does_not_block_rules_trust() {
+    fn workspace_template_change_blocks_until_trusted() {
         let dir = tempfile::tempdir().unwrap();
         let rules_path = dir.path().join("harness-rules.toml");
         fs::write(
@@ -429,7 +447,53 @@ mod tests {
         )
         .unwrap();
 
+        assert!(shared.ensure_rules_trusted_for_workspace(None).is_err());
+        shared.trust_rules_file(&rules_path).unwrap();
         shared.ensure_rules_trusted_for_workspace(None).unwrap();
+    }
+
+    #[test]
+    fn newly_configured_workspace_starts_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_rules = dir.path().join("global.toml");
+        fs::write(&global_rules, "version = 1\n").unwrap();
+        let shared = SharedConfig::new(Arc::new(Config {
+            manager: crate::config::ManagerConfig {
+                global_rules_file: global_rules.clone(),
+            },
+            ..Config::default()
+        }));
+
+        let workspace_dir = dir.path().join("workspace");
+        fs::create_dir(&workspace_dir).unwrap();
+        let workspace_rules = workspace_dir.join("harness-rules.toml");
+        fs::write(&workspace_rules, "version = 1\ntemplate = 'rust'\n").unwrap();
+        shared.set(Arc::new(Config {
+            manager: crate::config::ManagerConfig {
+                global_rules_file: global_rules,
+            },
+            workspaces: vec![WorkspaceConfig {
+                name: "new".to_string(),
+                canonical_path: workspace_dir,
+                sidebar_hotkey: None,
+                template: None,
+                mount_cwd: false,
+            }],
+            ..Config::default()
+        }));
+
+        assert!(
+            shared
+                .ensure_rules_trusted_for_workspace(Some("new"))
+                .is_err()
+        );
+        let expected = hex::encode(Sha256::digest(fs::read(&workspace_rules).unwrap()));
+        shared
+            .trust_rules_file_if_sha256(&workspace_rules, &expected)
+            .unwrap();
+        shared
+            .ensure_rules_trusted_for_workspace(Some("new"))
+            .unwrap();
     }
 
     #[test]

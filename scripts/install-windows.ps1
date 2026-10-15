@@ -111,6 +111,10 @@ function Ensure-Docker {
     $installer = Join-Path $script:WorkDirectory 'Docker Desktop Installer.exe'
     Invoke-WebRequest -Uri 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' `
         -OutFile $installer
+    $dockerSignature = Get-AuthenticodeSignature -FilePath $installer
+    if ($dockerSignature.Status -ne 'Valid' -or $dockerSignature.SignerCertificate.Subject -notmatch 'O=Docker Inc') {
+        throw 'Docker Desktop installer signature is invalid or is not from Docker Inc.'
+    }
     $process = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
         'install', '--quiet', '--accept-license', '--user', '--backend=wsl-2', '--no-windows-containers'
     )
@@ -182,6 +186,13 @@ try {
     $archiveUrl = "https://github.com/$Repository/releases/download/$release/hat-x86_64-pc-windows-msvc.zip"
     Write-Host "Installing Harness Hat $release..."
     Invoke-WebRequest -Uri $archiveUrl -OutFile $archive
+    $checksumFile = "$archive.sha256"
+    Invoke-WebRequest -Uri "$archiveUrl.sha256" -OutFile $checksumFile
+    $expectedHash = ((Get-Content -Raw $checksumFile).Trim() -split '\s+')[0]
+    $actualHash = (Get-FileHash -Algorithm SHA256 $archive).Hash
+    if ($actualHash -ine $expectedHash) {
+        throw 'Harness Hat release checksum verification failed.'
+    }
     $extractDirectory = Join-Path $script:WorkDirectory 'harness-hat'
     Expand-Archive -Path $archive -DestinationPath $extractDirectory -Force
     $releasedHat = Join-Path $extractDirectory 'hat.exe'

@@ -270,8 +270,6 @@ fn kill_network_connections(id: &str) -> Result<()> {
         );
     }
     let env = read_container_environment(&session.name)?;
-    let token = env_value(&env, "HARNESS_HAT_TOKEN")
-        .context("session does not expose its manager authentication token")?;
     let container_url = env_value(&env, "HARNESS_HAT_URL")
         .context("session does not expose its manager control URL")?;
     let control_url = host_control_url(container_url)?;
@@ -281,7 +279,7 @@ fn kill_network_connections(id: &str) -> Result<()> {
         .build()
         .context("building network disconnect client")?
         .post(format!("{control_url}/container/network/disconnect"))
-        .bearer_auth(token)
+        .bearer_auth(&session.session_token)
         .header("x-harness-hat-session-token", &session.session_token)
         .send()
         .context("requesting network disconnect; is the manager running?")?;
@@ -328,8 +326,10 @@ fn env_value<'a>(env: &'a [String], name: &str) -> Option<&'a str> {
 
 fn host_control_url(container_url: &str) -> Result<String> {
     let mut url = url::Url::parse(container_url).context("parsing session manager URL")?;
-    url.set_host(Some("127.0.0.1"))
-        .map_err(|_| anyhow::anyhow!("session manager URL has an invalid host"))?;
+    if url.host_str() == Some("host.docker.internal") {
+        url.set_host(Some("127.0.0.1"))
+            .map_err(|_| anyhow::anyhow!("session manager URL has an invalid host"))?;
+    }
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
@@ -727,6 +727,10 @@ mod tests {
         assert_eq!(
             host_control_url("http://host.docker.internal:7878/").unwrap(),
             "http://127.0.0.1:7878"
+        );
+        assert_eq!(
+            host_control_url("http://172.17.0.1:49152").unwrap(),
+            "http://172.17.0.1:49152"
         );
     }
 
